@@ -63,8 +63,8 @@
     "check": "pnpm run typecheck && pnpm run test && pnpm run lint:dead"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.3",
-    "@earendil-works/pi-tui": "0.84.3",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
     "@types/node": "^22.0.0",
     "esbuild": "^0.28.1",
     "knip": "^6.32.0",
