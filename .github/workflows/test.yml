@@ -10,16 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
       - name: ast-grep
         run: npm i -g @ast-grep/cli
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run check
+      - run: bun install --frozen-lockfile
+      - run: bun run check
       - name: CLI bundle smoke (the global install artifact)
         run: |
-          pnpm run build:cli
+          bun run build:cli
           node dist/cli.mjs status tests/fixtures/mini

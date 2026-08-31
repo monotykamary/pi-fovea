@@ -3,7 +3,7 @@
 ## Golden rule: check when done
 
 ```sh
-pnpm run check
+bun run check
 ```
 
 Runs typecheck + the full vitest suite + `lint:dead` (knip gate for unused
@@ -33,6 +33,6 @@ emits for unchanged file content), bump `CACHE_VERSION` in
 - Conventional commits: `feat(scope): ...`, `fix(scope): ...`.
 - Keep runtime deps at `typebox` only (pi provides it at extension load);
   heavy deps belong in devDependencies.
-- The published `fovea` bin is a bundle: `prepack` → `pnpm run build:cli`
+- The published `fovea` bin is a bundle: `prepack` → `bun run build:cli`
   (esbuild → `dist/cli.mjs`), so `npm i -g pi-fovea` needs neither tsx nor
   runtime deps. `check` never touches `dist/` — dev stays buildless.

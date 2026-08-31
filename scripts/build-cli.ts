@@ -1,8 +1,8 @@
 // Publish artifact for the global install path. Bundles the CLI into one
 // self-contained ESM file so `npm i -g pi-fovea` runs on plain node >= 20 —
-// no tsx, no node_modules. Dev never builds: `pnpm fovea` and `pnpm run
+// no tsx, no node_modules. Dev never builds: `bun run fovea` and `bun run run
 // check` run from source (pi loads the extension from src/ via jiti); only
-// `prepack` (npm/pnpm pack & publish) invokes this.
+// `prepack` (npm/bun run pack & publish) invokes this.
 
 import { build } from "esbuild";
 import { readFile, writeFile } from "node:fs/promises";

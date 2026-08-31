@@ -122,7 +122,7 @@ pi install git:github.com/monotykamary/pi-fovea
 From a local checkout:
 
 ```sh
-pnpm install
+bun install
 pi install /absolute/path/to/pi-fovea
 ```
 
@@ -141,10 +141,10 @@ fovea status /path/to/repo
 Install the CLI globally — the published bin is a single self-contained bundle, so it runs on plain Node.js (no tsx, no node_modules):
 
 ```sh
-npm i -g pi-fovea      # or: pnpm add -g pi-fovea, bun add -g pi-fovea
+npm i -g pi-fovea      # or: bun add -g pi-fovea, bun add -g pi-fovea
 ```
 
-From a checkout, `pnpm fovea` runs the live source via `tsx`, and `pnpm run build:cli` rebuilds `dist/cli.mjs` (the `prepack` hook keeps the published bundle in sync).
+From a checkout, `bun run fovea` runs the live source via `tsx`, and `bun run build:cli` rebuilds `dist/cli.mjs` (the `prepack` hook keeps the published bundle in sync).
 
 ## Large workspaces and startup
 
@@ -380,9 +380,9 @@ Config joins through literals: **YAML, JSON, TOML, env, Markdown, and OpenAPI**.
 ## Development
 
 ```sh
-pnpm install
-pnpm run check        # typecheck + full vitest suite
-pnpm run bench        # rate–distortion bench against ../pi-fabric
+bun install
+bun run check        # typecheck + full vitest suite
+bun run bench        # rate–distortion bench against ../pi-fabric
 ```
 
 pi loads the extension straight from `src/` through jiti, so nothing needs

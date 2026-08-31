@@ -8,7 +8,6 @@
     "node": ">=20"
   },
   "author": "monotykamary",
-  "packageManager": "pnpm@11.20.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/monotykamary/pi-fovea.git"
@@ -57,10 +56,10 @@
     "test": "vitest run",
     "bench": "tsx scripts/bench.ts",
     "build:cli": "tsx scripts/build-cli.ts",
-    "prepack": "pnpm run build:cli",
+    "prepack": "bun run build:cli",
     "fovea": "tsx cli.ts",
     "lint:dead": "knip",
-    "check": "pnpm run typecheck && pnpm run test && pnpm run lint:dead"
+    "check": "bun run typecheck && bun run test && bun run lint:dead"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.4",
@@ -85,5 +84,8 @@
     "@earendil-works/pi-tui": {
       "optional": true
     }
-  }
+  },
+  "workspaces": [
+    "."
+  ]
 }

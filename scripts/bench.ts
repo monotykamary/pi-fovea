@@ -1,6 +1,6 @@
 // Rate–distortion bench and scale smoke test.
 //
-//   pnpm run bench [root]            (default: ../pi-fabric)
+//   bun run bench [root]            (default: ../pi-fabric)
 //
 // Arms per budget B on a fixed query set:
 //   fovea   : union of nodes fovea_focus reveals at B, scored against the ideal
