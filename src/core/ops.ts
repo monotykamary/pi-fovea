@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { prFiles, uncommittedFiles } from "./git.js";
+import { diffHunks, prFiles, uncommittedFiles } from "./git.js";
 import { chebyshevVectors, chooseOrder, heatField } from "./heat.js";
 import { formatNodeLocation, revealFoveated, revealGroups, tokenEstimate, type GroupLine, type RevealedNode } from "./render.js";
 import { FOCUS_T0, getSession, observeSessionPaths, TK_ORDER } from "./session.js";
@@ -627,13 +627,98 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   if (args.base) for (const f of await prFiles(root, args.base)) files.add(f);
   if (args.includeUncommitted !== false && !args.base) for (const f of await uncommittedFiles(root)) files.add(f);
 
+  // Explicit what-if/sync files with Git discovery disabled may not describe
+  // the current HEAD patch (notably a semantic revert that is clean again),
+  // so only refine the Git-backed modes that own a trustworthy diff.
+  const useDiffHunks = !!args.base || args.includeUncommitted !== false;
+  const hunksByFile = files.size && useDiffHunks ? await diffHunks(root, args.base) : undefined;
   const seedSet = new Set<number>();
+  const seededFileNodes = new Set<number>();
+  const s = new Float64Array(g.nodes.length);
   for (const rel of files) {
-    const arr = g.byFile.get(rel) ?? g.byFile.get(posix.normalize(rel)) ?? [];
-    if (arr[0] !== undefined) seedSet.add(arr[0]);
+    const normalized = posix.normalize(rel);
+    const arr = g.byFile.get(rel) ?? g.byFile.get(normalized) ?? [];
+    const fileNode = arr.find((i) => g.nodes[i]!.kind === "file");
+    if (fileNode === undefined || seededFileNodes.has(fileNode)) continue;
+    seededFileNodes.add(fileNode);
+    const graphFile = g.nodes[fileNode]!.file;
+    const parsed = hunksByFile?.get(graphFile) ?? hunksByFile?.get(normalized) ?? hunksByFile?.get(rel);
+
+    // byFile is line-ordered. Collapse same-line declarations to the last
+    // node, matching an upper-bound enclosing-symbol lookup deterministically.
+    const symbols: number[] = [];
+    for (const i of arr) {
+      const node = g.nodes[i]!;
+      if (node.kind === "file" || node.kind === "anchor" || node.line < 1) continue;
+      const previous = symbols[symbols.length - 1];
+      if (previous !== undefined && g.nodes[previous]!.line === node.line) symbols[symbols.length - 1] = i;
+      else symbols.push(i);
+    }
+
+    const touched = new Map<number, number>();
+    let precise = !!parsed && !parsed.fallback && symbols.length > 0;
+    const upperBound = (line: number): number => {
+      let lo = 0;
+      let hi = symbols.length;
+      while (lo < hi) {
+        const mid = lo + ((hi - lo) >> 1);
+        if (g.nodes[symbols[mid]!]!.line <= line) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+    if (parsed && precise) {
+      for (const hunk of parsed.hunks) {
+        if (hunk.newLines === 0) continue;
+        const end = hunk.newStart + hunk.newLines;
+        if (hunk.newStart < 1 || hunk.newLines < 0 || !Number.isSafeInteger(end)) {
+          precise = false;
+          touched.clear();
+          break;
+        }
+        let cursor = hunk.newStart;
+        let at = upperBound(cursor) - 1;
+        if (at < 0) {
+          at = 0;
+          cursor = Math.max(cursor, g.nodes[symbols[0]!]!.line);
+        }
+        while (cursor < end && at < symbols.length) {
+          const node = symbols[at]!;
+          const next = symbols[at + 1];
+          const segmentEnd = Math.min(end, next === undefined ? end : g.nodes[next]!.line);
+          if (segmentEnd > cursor) touched.set(node, (touched.get(node) ?? 0) + segmentEnd - cursor);
+          cursor = segmentEnd;
+          at++;
+        }
+      }
+    }
+
+    if (!precise || !touched.size) {
+      // New, deleted, untracked, renamed, binary, oversized, malformed, and
+      // symbol-free files all preserve the old one-unit file-node nucleus.
+      seedSet.add(fileNode);
+      s[fileNode]! += 1;
+      continue;
+    }
+
+    const scored = [...touched.entries()].map(([node, lines]) => [node, Math.sqrt(lines)] as const);
+    const scoreTotal = scored.reduce((sum, [, score]) => sum + score, 0);
+    seedSet.add(fileNode);
+    s[fileNode]! += 0.2;
+    let assigned = 0.2;
+    for (let i = 0; i < scored.length; i++) {
+      const [node, score] = scored[i]!;
+      const weight = i === scored.length - 1 ? 1 - assigned : 0.8 * score / scoreTotal;
+      seedSet.add(node);
+      s[node]! += weight;
+      assigned += weight;
+    }
   }
   for (const sym of args.symbols ?? []) {
-    for (const r of resolveSeeds(state, sym).seeds) seedSet.add(r);
+    for (const r of resolveSeeds(state, sym).seeds) {
+      if (!seedSet.has(r)) s[r] = 1;
+      seedSet.add(r);
+    }
   }
   if (!seedSet.size) {
     return {
@@ -650,7 +735,6 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   // structural edge. Linearity makes this exactly heat(seeds + partners·w):
   // a change with recent history hot-reloads its old co-workers, an idle one
   // adds nothing, and wall-clock decay cools the affinity like any heat.
-  const s = seedVector(g.nodes.length, seeds);
   const historyFor = historySeedWeights(seedFiles, g, state.history, Date.now());
   let historyPartners = 0;
   for (const [file, w] of historyFor) {
