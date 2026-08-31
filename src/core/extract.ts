@@ -170,6 +170,25 @@ const topLocation = (
         break;
       }
     }
+    return { line, sig };
+  }
+  // ast-grep >= 0.45.3 reports decorated declarations with a 0-based range
+  // whose start sits on the leading decorator, not on the declared symbol.
+  // The signature line still identifies the symbol itself: if the source line
+  // at the range start does not carry the signature text, walk to the line
+  // that does. 0.45.2 ranges already align and skip this walk.
+  const startText = (sourceLines[item.range.start.line] ?? "").trim();
+  const sigHead = (sig.split("\n")[0] ?? "").trim();
+  if (sigHead && startText && !startText.includes(sigHead) && !sigHead.includes(startText)) {
+    const end = Math.min(sourceLines.length - 1, item.range.end?.line ?? item.range.start.line + 12);
+    for (let i = item.range.start.line; i <= end; i++) {
+      const candidate = (sourceLines[i] ?? "").trim();
+      if (candidate && (candidate.includes(sigHead) || sigHead.includes(candidate))) {
+        line = i + 1;
+        sig = cleanSig(sourceLines[i] ?? "");
+        break;
+      }
+    }
   }
   return { line, sig };
 };
@@ -188,11 +207,9 @@ const parseStructuredOutline = async (
       const name = outlineName(item.name);
       if (name !== undefined) items.push(name === item.name ? item : { ...item, name });
     }
-    const needsCorrection = items.some((item) => {
-      const sig = cleanSig(item.signature || item.name);
-      return !!item.name && (!identifierRe(item.name).test(sig) || /^@/.test(sig));
-    });
-    const sourceLines = needsCorrection ? (await source.read(file))?.split("\n") ?? [] : [];
+    // Source lines are always read: topLocation's alignment walk needs them
+    // for ast-grep >= 0.45.3 decorated ranges, not just @-prefixed names.
+    const sourceLines = (await source.read(file))?.split("\n") ?? [];
     const concreteParents = new Set(
       items.filter((item) => item.symbolType !== "object").map((item) => item.name),
     );
