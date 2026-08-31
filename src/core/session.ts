@@ -25,6 +25,16 @@ export interface FoveaSession {
   syncScopes: Set<string>;
   tk: Float64Array[];
   tkKey: string;
+  /** Persistent review obligations for the active change epoch. */
+  obligationEpoch?: {
+    epochId: string;
+    ledger: Map<string, {
+      mass: number;
+      reasons: string[];
+      generation: number;
+      status: "unresolved" | "inspected" | "changed" | "verified";
+    }>;
+  };
 }
 
 export const FOCUS_T0 = 2;
@@ -85,6 +95,12 @@ export const observeSessionPaths = (root: string, paths: readonly string[]): str
 
 // `/new` and friends: same repo, fresh eyes.
 export const resetSessions = (): void => {
+  // Clear ledgers before dropping sessions so callers retaining an old session
+  // cannot keep querying obligations across a conversation reset.
+  for (const session of sessions.values()) {
+    session.obligationEpoch?.ledger.clear();
+    delete session.obligationEpoch;
+  }
   // A fresh conversation cannot reuse disclosure or Chebyshev vectors; drop
   // the entries outright so large Float64Array stacks become collectible.
   sessions.clear();
