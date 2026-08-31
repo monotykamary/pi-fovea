@@ -7,13 +7,14 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { diffHunks, prFiles, uncommittedFiles } from "./git.js";
-import { chebyshevVectors, chooseOrder, heatField } from "./heat.js";
+import { chebyshevVectors, chooseOrder, forwardHeat, heatField } from "./heat.js";
 import { formatNodeLocation, revealFoveated, revealGroups, tokenEstimate, type GroupLine, type RevealedNode } from "./render.js";
 import { FOCUS_T0, getSession, observeSessionPaths, TK_ORDER } from "./session.js";
 import { detectBasins } from "./basins.js";
 import { classifyLiteral, normalizeLiteral } from "./join.js";
 import { isTestFile } from "./extract.js";
-import { effectiveWeight, type CoChangeHistory } from "./cochange.js";
+import { effectiveWeight, expectationResiduals, type CoChangeHistory } from "./cochange.js";
+import { epochStats, mergeWarmed, openEpoch, residual } from "./obligations.js";
 import type { Graph, NodeKind, NodeRec } from "./types.js";
 import { ensureState } from "./state.js";
 import type { RepoState } from "./state.js";
@@ -735,7 +736,13 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   // structural edge. Linearity makes this exactly heat(seeds + partners·w):
   // a change with recent history hot-reloads its old co-workers, an idle one
   // adds nothing, and wall-clock decay cools the affinity like any heat.
-  const historyFor = historySeedWeights(seedFiles, g, state.history, Date.now());
+  const now = Date.now();
+  const historyFor = historySeedWeights(seedFiles, g, state.history, now);
+  // Unmet-companion residual: partners with strong directional co-change
+  // history (Wilson lower bound, lift + support + recency gated) absent from
+  // this diff. A deterministic omitted-edit alarm, separate from the generic
+  // history warmth above.
+  const companionResiduals = expectationResiduals([...seedFiles].sort(), state.history, now);
   let historyPartners = 0;
   for (const [file, w] of historyFor) {
     const fileNode = (g.byFile.get(file) ?? []).find((i) => g.nodes[i]!.kind === "file");
@@ -745,6 +752,17 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   }
   const field = heatField(chebyshevVectors(state.csr, s, chooseOrder(t)), t, g.nodes.length);
   const exclude = new Set(seeds.map((i) => g.nodes[i]!.id));
+  // Conserved view of the same cascade: degree-corrected random-walk heat
+  // keeps total mass per component (raw field mass drifts with the sqrt-degree
+  // bias). Emitted alongside the raw field until sync thresholds are
+  // recalibrated on the conserved scale; never mixed into the surprise gate.
+  const conserved = forwardHeat(state.csr, s, t);
+  const conservedByFile = new Map<string, number>();
+  g.nodes.forEach((n, i) => {
+    if (exclude.has(n.id) || seedFiles.has(n.file)) return;
+    const v = conserved[i]!;
+    if (v > 1e-9) conservedByFile.set(n.file, (conservedByFile.get(n.file) ?? 0) + v);
+  });
 
   // Aggregate warmed mass per file (excluding the seeds themselves). Heat
   // retained by the seed files (seedMass) is the scale-free normalizer turn
@@ -876,6 +894,15 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
     for (const [k, v] of warmed.slice(0, 2000)) warmedNodes[k] = v;
   }
 
+  // Obligation ledger: merge this cascade's residual mass additively. Unlike
+  // novelty heat, entries persist until evidence transitions them (read/edit/
+  // verify) or the epoch resets — the conservation half of the
+  // salience/obligation split.
+  const foveaSession = getSession(root);
+  if (!foveaSession.obligationEpoch) openEpoch(foveaSession, seedFiles);
+  if (companionResiduals.size) mergeWarmed(foveaSession, companionResiduals, "unmet co-change companion");
+  if (fileAgg.size) mergeWarmed(foveaSession, fileAgg, "diffusion residual");
+
   const fileEntries = [...fileAgg.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const fileGroups: GroupLine[] = [];
   for (const [file, mass] of fileEntries) {
@@ -925,6 +952,23 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
         [...(reasonByFile.get(file) ?? new Set(["graph path"]))],
       ])),
       warmedNodes,
+      // Deterministic omitted-edit alarm, strongest first, capped.
+      expectedButUnchanged: [...companionResiduals.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 12)
+        .map(([file, weight]) => ({ file, weight: Number(weight.toFixed(4)) })),
+      // Conserved per-file mass (degree-corrected random-walk heat, seeds
+      // excluded). A parallel measurement to warmedMass, not yet consumed by
+      // sync thresholds.
+      conservedMass: Object.fromEntries(
+        [...conservedByFile.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .map(([file, mass]) => [file, Number(mass.toFixed(6))]),
+      ),
+      // Persistent obligation checklist: survives disclosure and wall-clock
+      // time; cleared only by evidence transitions or an epoch reset.
+      obligations: residual(foveaSession).slice(0, 10),
+      epoch: epochStats(foveaSession),
     },
   };
 };
