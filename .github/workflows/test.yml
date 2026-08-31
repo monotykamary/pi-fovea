@@ -15,7 +15,7 @@ jobs:
         with:
           node-version: 24
       - name: ast-grep
-        run: npm i -g @ast-grep/cli
+        run: npm i -g @ast-grep/cli@0.45.2
       - run: bun install --frozen-lockfile
       - run: bun run check
       - name: CLI bundle smoke (the global install artifact)
