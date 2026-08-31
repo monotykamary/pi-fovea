@@ -160,6 +160,63 @@ export const heatAt = (csr: Csr, s: Float64Array, t: number): Float64Array => {
   return heatField(chebyshevVectors(csr, s, K), t, csr.n);
 };
 
+// Forward random-walk heat. `a` is mass, so conjugating the symmetric heat
+// kernel by D^{1/2} preserves its sum and converges to degree-proportional
+// mass within each connected component.
+export const forwardHeat = (csr: Csr, a: Float64Array, t: number): Float64Array => {
+  const seed = new Float64Array(csr.n);
+  for (let i = 0; i < csr.n; i++) {
+    const d = csr.deg[i]!;
+    if (d > 0) seed[i] = (a[i] ?? 0) / Math.sqrt(d);
+  }
+  const v = heatField(chebyshevVectors(csr, seed, chooseOrder(t)), t, csr.n);
+  const p = new Float64Array(csr.n);
+  for (let i = 0; i < csr.n; i++) {
+    const d = csr.deg[i]!;
+    // D^{±1/2} is undefined at degree zero. An isolated node is a singleton
+    // component, so its random walk is the identity rather than e^{-t}.
+    p[i] = d > 0 ? Math.sqrt(d) * v[i]! : (a[i] ?? 0);
+  }
+  return p;
+};
+
+// Backward random-walk heat used as a focus score. Its stationary value on a
+// connected component is the degree-weighted mean of the initial field.
+export const focusField = (csr: Csr, a: Float64Array, t: number): Float64Array => {
+  const seed = new Float64Array(csr.n);
+  for (let i = 0; i < csr.n; i++) {
+    const d = csr.deg[i]!;
+    if (d > 0) seed[i] = Math.sqrt(d) * (a[i] ?? 0);
+  }
+  const v = heatField(chebyshevVectors(csr, seed, chooseOrder(t)), t, csr.n);
+  const f = new Float64Array(csr.n);
+  for (let i = 0; i < csr.n; i++) {
+    const d = csr.deg[i]!;
+    f[i] = d > 0 ? v[i]! / Math.sqrt(d) : (a[i] ?? 0);
+  }
+  return f;
+};
+
+// Positive focus remaining above stationarity. `f` and `deg` describe one
+// connected component; degree-zero singleton components have no excess.
+export const excess = (f: Float64Array, deg: Float64Array): Float64Array => {
+  let totalDegree = 0;
+  let weightedField = 0;
+  for (let i = 0; i < f.length; i++) {
+    const d = deg[i] ?? 0;
+    if (d <= 0) continue;
+    totalDegree += d;
+    weightedField += d * f[i]!;
+  }
+  const out = new Float64Array(f.length);
+  if (totalDegree === 0) return out;
+  const stationaryMean = weightedField / totalDegree;
+  for (let i = 0; i < f.length; i++) {
+    if ((deg[i] ?? 0) > 0) out[i] = Math.max(0, f[i]! - stationaryMean);
+  }
+  return out;
+};
+
 // Reference implementation for tests: e^{-tL} via scaling-and-squaring. A
 // raw Taylor series at time t has intermediate terms up to (t||L||)^k/k! ~ e^{2t},
 // which cancels ~2t digits; instead apply the short-time Taylor step
