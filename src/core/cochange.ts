@@ -6,9 +6,9 @@
 // share no static edge but are always edited in the same commits.
 //
 // Under the all-in heat model that signal is a seeded field, not permanent
-// structure. Each (a, b) pair records the count of joint commits and the
-// committer timestamp of the most recent one; at wall-clock `now` its
-// contribution is
+// structure. Each (a, b) pair records directional touch counts plus the
+// committer timestamp of the most recent joint commit; at wall-clock `now`
+// its heat contribution is
 //
 //     w = w0(count, jaccard) * 2^(-ageDays / COCHANGE_HALF_LIFE_DAYS)
 //
@@ -17,9 +17,10 @@
 // almost nothing. Nothing pins history into the graph, so old co-work cools
 // out of the field exactly like every other heat source.
 //
-// Bounded by commit window and per-file pair caps; the raw facts (count +
-// lastTs) are cached by HEAD + tracked-file set, and recency is applied at
-// USE time so even a cached hit cools as the wall clock advances.
+// Bounded by commit window and per-file pair caps; the raw facts (counts +
+// lastTs) are cached by HEAD + tracked-file set + an independent cache
+// version, and recency is applied at USE time so even a cached hit cools as
+// the wall clock advances.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -32,6 +33,10 @@ const LOG_COMMITS = 400;
 const MAX_FILES_PER_COMMIT = 24; // squashed monsters carry no pair signal
 const MIN_SHARED = 2;            // a single collision is noise
 const MAX_PAIRS_PER_FILE = 16;   // cap each file's history fan-out
+const COCHANGE_CACHE_VERSION = 3;
+const EXPECTATION_MIN_SUPPORT = 3;
+const WILSON_Z_95 = 1.96;
+const DAY_MS = 86_400_000;
 
 /** Wall-clock half-life (days) of a co-change pair. Past joint work cools
  * with exponential decay; FOVEA_COCHANGE_HALF_LIFE_DAYS tunes how fast. */
@@ -44,6 +49,14 @@ export interface CoChangePartner {
   w: number;
   /** Committer epoch ms of the most recent joint commit of this pair. */
   lastTs: number;
+  /** Joint commits for this directional pair in the bounded history window. */
+  n_ij?: number;
+  /** Commits in the window that touch the source file. */
+  n_i?: number;
+  /** Commits in the window that touch the partner file. */
+  n_j?: number;
+  /** Total commits observed in the bounded history window. */
+  N?: number;
 }
 
 /** Per-file history memory: file -> past co-change partners. Raw facts only;
@@ -71,11 +84,88 @@ export const scorePair = (n: number, soloA: number, soloB: number): number => {
   return Math.min(0.5, 0.08 + 0.55 * jaccard + 0.10 * Math.min(n / 10, 1));
 };
 
+const wilsonLower95 = (successes: number, trials: number): number => {
+  if (trials <= 0 || successes < 0 || successes > trials) return 0;
+  const p = successes / trials;
+  const z2 = WILSON_Z_95 * WILSON_Z_95;
+  const denominator = 1 + z2 / trials;
+  const centre = p + z2 / (2 * trials);
+  const radius = WILSON_Z_95 * Math.sqrt((p * (1 - p) + z2 / (4 * trials)) / trials);
+  return Math.max(0, (centre - radius) / denominator);
+};
+
+const pathOrder = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
+
+/**
+ * Find historical companions conspicuously absent from `changedFiles`.
+ *
+ * For each changed i -> unchanged j pair, q(j|i) is the 95% Wilson lower
+ * bound on n_ij / n_i. A ubiquitous j is not informative, so q must beat
+ * j's base rate n_j / N; multiplying q by (1 - 1/lift) leaves exactly that
+ * conservative excess. Independent changed-file evidence adds, with the
+ * result capped at one, and the newest joint commit supplies the usual
+ * wall-clock recency decay.
+ *
+ * Count fields are optional on CoChangePartner for compatibility with
+ * hand-built pre-v3 heat histories. Records without complete v3 counts do
+ * not provide residual evidence.
+ */
+export const expectationResiduals = (
+  changedFiles: string[],
+  history: CoChangeHistory,
+  now = Date.now(),
+): Map<string, number> => {
+  const changed = new Set(changedFiles);
+  const totals = new Map<string, number>();
+  const sources = [...changed].sort(pathOrder);
+
+  for (const source of sources) {
+    const partners = [...(history.get(source) ?? [])].sort((a, b) =>
+      pathOrder(a.partner, b.partner)
+      || (a.n_ij ?? 0) - (b.n_ij ?? 0)
+      || (a.n_i ?? 0) - (b.n_i ?? 0)
+      || (a.n_j ?? 0) - (b.n_j ?? 0)
+      || a.lastTs - b.lastTs);
+    for (const p of partners) {
+      if (changed.has(p.partner)) continue;
+      const nIJ = p.n_ij;
+      const nI = p.n_i;
+      const nJ = p.n_j;
+      const total = p.N;
+      if (
+        nIJ === undefined || nI === undefined || nJ === undefined || total === undefined
+        || !Number.isInteger(nIJ) || !Number.isInteger(nI)
+        || !Number.isInteger(nJ) || !Number.isInteger(total)
+        || nIJ < EXPECTATION_MIN_SUPPORT || nIJ > nI || nIJ > nJ
+        || nI <= 0 || nJ < 0 || total <= 0 || nI > total || nJ > total
+      ) continue;
+
+      const q = wilsonLower95(nIJ, nI);
+      const baseRate = nJ / total;
+      if (q <= baseRate) continue;
+      const lift = baseRate > 0 ? q / baseRate : Number.POSITIVE_INFINITY;
+      const liftDiscount = Number.isFinite(lift) ? 1 - 1 / lift : 1;
+      const ageDays = Math.max(0, (now - p.lastTs) / DAY_MS);
+      const contribution = effectiveWeight(q * liftDiscount, ageDays);
+      if (!(contribution > 0) || !Number.isFinite(contribution)) continue;
+      totals.set(p.partner, (totals.get(p.partner) ?? 0) + contribution);
+    }
+  }
+
+  const ranked: Array<[string, number]> = [...totals]
+    .map(([file, weight]): [string, number] => [file, Math.min(1, weight)])
+    .sort((a, b) => b[1] - a[1] || pathOrder(a[0], b[0]));
+  return new Map(ranked);
+};
+
+type CachedPair = [string, string, number, number, number, number, number];
+
 interface CacheShape {
   v: number;
   head: string;
   key: string;
-  pairs: Array<[string, string, number, number]>;
+  commits: number;
+  pairs: CachedPair[];
 }
 
 const cachePath = (root: string): string =>
@@ -94,11 +184,18 @@ export const coChangeHistory = async (
   const prefix = await gitPrefix(root);
   if (prefix === undefined) return new Map();
   const tracked = new Set(filesInGraph);
-  const key = createHash("sha1").update([...tracked].sort().join("\n")).digest("hex").slice(0, 12);
+  const key = createHash("sha1")
+    .update(`v${COCHANGE_CACHE_VERSION}\0`)
+    .update([...tracked].sort().join("\n"))
+    .digest("hex")
+    .slice(0, 12);
   const cp = cachePath(root);
   try {
     const cached = JSON.parse(await readFile(cp, "utf8")) as CacheShape;
-    if (cached.v === 2 && cached.head === head && cached.key === key) return groupPairs(cached.pairs);
+    if (
+      cached.v === COCHANGE_CACHE_VERSION && cached.head === head && cached.key === key
+      && Number.isInteger(cached.commits) && Array.isArray(cached.pairs)
+    ) return groupPairs(cached.pairs, cached.commits);
   } catch { /* recompute */ }
 
   const log = await gitOut(root, ["log", "--format=%x00%ct", "--numstat", "-n", String(LOG_COMMITS), "--no-renames", "--diff-filter=AMR", "--", "."]) ?? "";
@@ -106,15 +203,23 @@ export const coChangeHistory = async (
   // line carrying its committer timestamp (%ct).
   const pairCount = new Map<string, number>();
   const pairLast = new Map<string, number>();
-  const soloCount = new Map<string, number>();
+  const touchCount = new Map<string, number>();
+  let commits = 0;
+  let inCommit = false;
   let cur: string[] = [];
   let curTs = 0;
   const flush = (): void => {
-    const fs = [...new Set(cur)].filter((f) => tracked.has(f));
+    if (!inCommit) {
+      cur = [];
+      return;
+    }
+    inCommit = false;
+    const fs = [...new Set(cur)].filter((f) => tracked.has(f)).sort();
     cur = [];
+    // Directional denominators include solo touches and oversized commits;
+    // only pair production observes the monster-commit fan-out bound.
+    for (const f of fs) touchCount.set(f, (touchCount.get(f) ?? 0) + 1);
     if (fs.length < 2 || fs.length > MAX_FILES_PER_COMMIT) return;
-    fs.sort();
-    for (const f of fs) soloCount.set(f, (soloCount.get(f) ?? 0) + 1);
     for (let i = 0; i < fs.length; i++) {
       for (let j = i + 1; j < fs.length; j++) {
         const k = `${fs[i]}|${fs[j]}`;
@@ -127,6 +232,9 @@ export const coChangeHistory = async (
     if (!line.trim()) continue;
     if (line.includes("\0")) {
       flush();
+      inCommit = true;
+      commits++;
+      curTs = 0;
       const ts = Number(line.slice(line.indexOf("\0") + 1).trim());
       if (Number.isFinite(ts)) curTs = ts * 1000;
       continue;
@@ -140,13 +248,15 @@ export const coChangeHistory = async (
   }
   flush();
 
-  const scored: Array<[string, string, number, number]> = [];
+  const scored: CachedPair[] = [];
   for (const [k, n] of pairCount) {
     if (n < MIN_SHARED) continue;
     const [a, b] = k.split("|") as [string, string];
-    const w = scorePair(n, soloCount.get(a) ?? 0, soloCount.get(b) ?? 0);
+    const nA = touchCount.get(a) ?? 0;
+    const nB = touchCount.get(b) ?? 0;
+    const w = scorePair(n, nA, nB);
     if (w <= 0) continue;
-    scored.push([a, b, w, pairLast.get(k) ?? 0]);
+    scored.push([a, b, w, pairLast.get(k) ?? 0, n, nA, nB]);
   }
 
   // Keeper filter: per-file top partners by EFFECTIVE hotness (recency
@@ -157,8 +267,8 @@ export const coChangeHistory = async (
   scored.forEach((p, i) => {
     for (const f of [p[0], p[1]]) (perFile.get(f) ?? perFile.set(f, []).get(f)!).push(i);
   });
-  const eff = (p: [string, string, number, number]): number =>
-    p[2] * recencyFactor(Math.max(0, now - p[3]) / 86_400_000);
+  const eff = (p: CachedPair): number =>
+    p[2] * recencyFactor(Math.max(0, now - p[3]) / DAY_MS);
   const keep = new Set<number>();
   for (const [, idxs] of perFile) {
     idxs.sort((x, y) => eff(scored[y]!) - eff(scored[x]!));
@@ -168,21 +278,36 @@ export const coChangeHistory = async (
 
   try {
     await mkdir(dirname(cp), { recursive: true });
-    await writeFile(cp, JSON.stringify({ v: 2, head, key, pairs } satisfies CacheShape));
+    await writeFile(cp, JSON.stringify({
+      v: COCHANGE_CACHE_VERSION,
+      head,
+      key,
+      commits,
+      pairs,
+    } satisfies CacheShape));
   } catch { /* cache is an optimization */ }
-  return groupPairs(pairs);
+  return groupPairs(pairs, commits);
 };
 
-const groupPairs = (pairs: Array<[string, string, number, number]>): CoChangeHistory => {
+const groupPairs = (pairs: CachedPair[], commits: number): CoChangeHistory => {
   const out: CoChangeHistory = new Map();
-  const push = (a: string, b: string, w: number, lastTs: number): void => {
+  const push = (
+    a: string,
+    b: string,
+    w: number,
+    lastTs: number,
+    nIJ: number,
+    nI: number,
+    nJ: number,
+  ): void => {
+    const partner: CoChangePartner = { partner: b, w, lastTs, n_ij: nIJ, n_i: nI, n_j: nJ, N: commits };
     const list = out.get(a);
-    if (list) list.push({ partner: b, w, lastTs });
-    else out.set(a, [{ partner: b, w, lastTs }]);
+    if (list) list.push(partner);
+    else out.set(a, [partner]);
   };
-  for (const [a, b, w, lastTs] of pairs) {
-    push(a, b, w, lastTs);
-    push(b, a, w, lastTs);
+  for (const [a, b, w, lastTs, nIJ, nA, nB] of pairs) {
+    push(a, b, w, lastTs, nIJ, nA, nB);
+    push(b, a, w, lastTs, nIJ, nB, nA);
   }
   return out;
 };
