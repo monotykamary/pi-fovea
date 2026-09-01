@@ -245,37 +245,36 @@ FOVEA_TURN_SYNC=off pi
 
 ## Salience and obligations
 
-`fovea_impact` runs two different clocks on the same graph, on purpose:
+`fovea_impact` keeps two clocks on the same graph.
 
-- **Heat ranks what's interesting.** Seeds come from the diff itself —
-hunk-precise, mapped to enclosing symbols, one unit of mass per changed file
-split `0.2` file node / `0.8` across touched symbols by `sqrt(changed lines)`. Heat
-then spreads along static edges plus recency-decayed co-change partners, and
-decays: a prior must forget. Structural edits that cannot be located at symbol
-precision (new, deleted, renamed, untracked, oversized diffs) fall back to the
-old file-node nucleus.
-- **The obligation ledger remembers what's owed.** Every cascade merges its
-per-file residual mass into a session epoch additively, and entries do not
-decay — not by wall clock, not by disclosure. Only evidence transitions them
-(read → `inspected`, edit → `changed`, verification → `verified`) or an epoch
-reset clears them. Where heat is dissipative by design, obligations are
-conservative: the ledger is a checklist the environment keeps, so a small
-model cannot confuse *having seen* with *having finished*.
+Heat finds what matters now. Seeds come from the diff. Hunk parsing maps each
+change to the symbols that contain it. One unit of mass goes to each changed
+file: `0.2` on the file node, `0.8` over the touched symbols in proportion to
+`sqrt(changed lines)`. Heat then spreads along static edges and along co-change
+partners, and decays with wall-clock time. Edits that resist symbol-level
+location fall back to the old file-node seed. New files, deletions, renames,
+untracked paths, and oversized diffs all take that path.
 
-Impact's structured details carry all three signals separately:
+The obligation ledger keeps the list. Every cascade merges its per-file
+residual mass into a session epoch. Entries stay until evidence moves them. A
+read marks `inspected`. An edit marks `changed` and raises the generation. A
+verified run marks `verified`. A reset clears the epoch. Wall-clock time
+touches nothing here, and disclosure removes nothing. A model that saw a file
+still owes the work the ledger records.
 
-- `expectedButUnchanged` — files with strong *directional* co-change history
-(that changed with yours in most past commits, Wilson lower bound with lift,
-support, and recency gates) that did **not** join this diff. The deterministic
-omitted-edit alarm for latent coupling the parser cannot see.
-- `conservedMass` — the same cascade under degree-corrected random-walk heat,
-where total mass is conserved per connected component. Comparable across graph
-sizes in a way raw field mass is not. Emitted as a parallel measurement; sync
-gates stay on the calibrated raw scale.
-- `obligations` / `epoch` — the strongest unresolved entries with their reasons
-and generations, plus epoch totals.
+Impact details carry three separate signals:
 
-`docs/heat-diffusion.md` has the full mechanics and the design rationale.
+- `expectedButUnchanged`: files with strong directional co-change history that
+stayed out of this diff. A Wilson lower bound drives the score, with lift,
+support, and recency gates. Treat it as the alarm for the serializer nobody
+edited.
+- `conservedMass`: the same cascade under degree-corrected random-walk heat.
+Total mass stays fixed per connected component, so file masses compare across
+repos of different sizes. Sync gates stay on the older raw scale.
+- `obligations` and `epoch`: the strongest unresolved entries with their
+reasons and generations, plus epoch totals.
+
+`docs/heat-diffusion.md` has the full mechanics.
 
 ## Configuration
 
