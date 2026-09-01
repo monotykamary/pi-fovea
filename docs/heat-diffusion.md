@@ -101,6 +101,38 @@ Joint git history carries the *software development over time* signal. The affin
 
 `FOVEA_COCHANGE_HALF_LIFE_DAYS` (default 30) sets the wall-clock half-life.
 
+## Conserved fields: the degree-corrected view
+
+The raw field $v(t) = e^{-tL}s$ answers *what is near what*, but on the symmetric normalized Laplacian it is not mass-conserving: the $D^{-1/2}$ coordinates carry a $\sqrt{d}$ bias, and $\sum_i v_i(t)$ drifts with graph size and component structure. Heat retained by a hub and heat retained by a leaf are not comparable, and thresholds calibrated on one repo do not transfer to another.
+
+`heat.ts` therefore exposes the random-walk view on the same Chebyshev machinery:
+
+- `forwardHeat(csr, a, t)`: seed mass vector $a$ (one unit per changed node) in, $v = e^{-tL}(D^{-1/2}a)$, out $p = D^{1/2}v$. This is forward random-walk heat: $\sum_{i \in C} p_i$ is **conserved within each connected component** for all $t$, and the stationary limit is degree-proportional, $p_i \propto d_i$. Isolated nodes (own component, $L_{ii}=1$) retain their seed mass.
+- `focusField(csr, a, t)` and `excess(f, deg)`: the focus-side transform $f = D^{-1/2} e^{-tL} D^{1/2} a$, with positive excess scored above the component's degree-weighted stationary mean, so ranking asks *warmer than equilibrium?* instead of *how warm?*
+
+`impact` emits per-file conserved mass as `conservedMass` next to `warmedMass` — a parallel measurement, seeds excluded. Sync gates stay on the calibrated raw scale until thresholds are re-derived on the conserved one; the two are never mixed.
+
+## Obligations: the conservative half
+
+Heat answers *what is interesting now*, and its dissipation is a feature: a prior that never forgets saturates into uniform warmth and stops guiding. But completeness is a different invariant. A session that renders, discloses, or wall-clock-decays its way past unfinished work has not finished the work — it has lost the ledger. So the same graph supports a second field with the opposite physics:
+
+- **Additive, never decaying.** Every `impact` cascade merges its per-file residual mass into the session's obligation epoch (`mergeWarmed` with the `diffusion residual` reason). Entries persist through disclosure, rendering, and wall-clock time. Mass leaves the `unresolved` state only through named evidence transitions: a successful read after the entry's generation marks it `inspected`, a semantic edit marks it `changed` (bumping the generation so later reads can re-mark), verification marks it `verified`. Nothing is deleted by anything else.
+- **Bounded, deterministically.** The ledger caps at 512 files, evicting the weakest mass first with path-order tie-breaks. Resets happen only at an explicit epoch reset or `resetSessions()`.
+- **Surfaced in `impact` details** as `obligations` (strongest unresolved first, with reasons and generations) and `epoch` totals — a checklist the environment keeps so a model cannot confuse *having seen* with *having finished*.
+- **Host wiring.** The status transitions (`markRead`, `markEdited`, `markVerified`) are exported for the host's tool-end hooks; until those land, entries accumulate as `unresolved`, which is the safe default — an unproven obligation stays one.
+
+The design split, stated once: **heat is dissipative because attention must rank; obligations are conservative because completeness is conservation** — mass leaves the ledger only through evidence, like double-entry accounting rather than the heat equation. The two fields are dual, not redundant.
+
+## Unmet-companion residuals: heat for absence
+
+Co-change history says what *usually* moves together; a latent-coupling bug is what *should have* moved and didn't. That is counterfactual — no diffusion can warm a file for not changing. So the residual is computed directly from the directional history and seeded as labelled heat:
+
+- The co-change cache (v3) now retains directional counts: $n_{ij}$ joint commits, $n_i$, $n_j$ total commits per file within the scanned window.
+- For changed file $i$ and unchanged partner $j$, the conditional $q(j \mid i)$ is taken as the **Wilson score lower bound** (95%) on $n_{ij}/n_i$, discounted by lift (the conditional must beat the base rate $n_j/N$ by a margin), a support floor ($n_{ij} \ge 3$), and the same $2^{-\text{ageDays}/\tau}$ recency as pair conductance. Weight is capped at 1.
+- $r_j = (1 - x_j)\bigl[1 - \prod_{i : x_i = 1}(1 - q(j|i))\bigr]$ over the changed set — the probability that at least one changed file's expected companion failed to appear. Deterministic: fixed iteration order, weight desc then path.
+
+Residuals surface in `impact` details as `expectedButUnchanged` (strongest first, capped at 12) and merge into the obligation ledger under `unmet co-change companion`. They cool as history ages and vanish the moment the companion joins the diff — evidence, not assertion.
+
 ## Inferred regions (basins)
 
 Where a repo has no anchors, the silhouette uses inferred features instead. Seeds are nodes whose conductance and local triangle density $\tau$ pass thresholds. A seed scores

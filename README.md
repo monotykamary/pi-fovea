@@ -58,7 +58,7 @@ and test commands in your loop. CI has the final say.
 | `fovea_sketch` | where is everything? | production-first silhouette; test and fixture architecture stays collapsed |
 | `fovea_focus` | what is this? | exact matches, typed relationships, suggested reads, optional source scopes, and deterministic `fresh` views |
 | `fovea_dwell` | what else? | widens the current focus and returns newly relevant neighbors |
-| `fovea_impact` | what does this touch? | warms everything a file, symbol, or PR base reaches across languages |
+| `fovea_impact` | what does this touch? | hunk-precise symbol seeding, review order across languages, unmet co-change companions, and a persistent obligation checklist |
 | `grep` *(default hybrid)* | graph or text? | bare identifiers, qualified symbols, repo paths, and routes use Fovea; search options and obvious regex retain native grep |
 
 Focus normalizes camelCase and common inflections. An approximate name such as
@@ -242,6 +242,40 @@ environment override still turns sync off with:
 ```sh
 FOVEA_TURN_SYNC=off pi
 ```
+
+## Salience and obligations
+
+`fovea_impact` runs two different clocks on the same graph, on purpose:
+
+- **Heat ranks what's interesting.** Seeds come from the diff itself —
+hunk-precise, mapped to enclosing symbols, one unit of mass per changed file
+split `0.2` file node / `0.8` across touched symbols by `sqrt(changed lines)`. Heat
+then spreads along static edges plus recency-decayed co-change partners, and
+decays: a prior must forget. Structural edits that cannot be located at symbol
+precision (new, deleted, renamed, untracked, oversized diffs) fall back to the
+old file-node nucleus.
+- **The obligation ledger remembers what's owed.** Every cascade merges its
+per-file residual mass into a session epoch additively, and entries do not
+decay — not by wall clock, not by disclosure. Only evidence transitions them
+(read → `inspected`, edit → `changed`, verification → `verified`) or an epoch
+reset clears them. Where heat is dissipative by design, obligations are
+conservative: the ledger is a checklist the environment keeps, so a small
+model cannot confuse *having seen* with *having finished*.
+
+Impact's structured details carry all three signals separately:
+
+- `expectedButUnchanged` — files with strong *directional* co-change history
+(that changed with yours in most past commits, Wilson lower bound with lift,
+support, and recency gates) that did **not** join this diff. The deterministic
+omitted-edit alarm for latent coupling the parser cannot see.
+- `conservedMass` — the same cascade under degree-corrected random-walk heat,
+where total mass is conserved per connected component. Comparable across graph
+sizes in a way raw field mass is not. Emitted as a parallel measurement; sync
+gates stay on the calibrated raw scale.
+- `obligations` / `epoch` — the strongest unresolved entries with their reasons
+and generations, plus epoch totals.
+
+`docs/heat-diffusion.md` has the full mechanics and the design rationale.
 
 ## Configuration
 
