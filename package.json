@@ -1,6 +1,6 @@
 {
   "name": "pi-fovea",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Token-budgeted repo mapping for agent sessions: foveated heat diffusion over a cross-language code graph, with progressive disclosure.",
   "type": "module",
   "license": "MIT",
