@@ -25,6 +25,7 @@ import { join as joinPath } from "node:path";
 import {
   anonymousVariadics,
   groupByLang,
+  liveConstraints,
   patternRunAll,
   scanRules,
   type AgMatch,
@@ -594,16 +595,21 @@ export const anchorScanPlan = (files: string[], pack: AnchorRule[] = DEFAULT_PAC
       for (const pattern of rule.patterns ?? [rule.pattern!]) {
         const id = `fovea-anchor-match-${ordinal++}`;
         matchIds.push(id);
+        // restKey rules read named multi captures ($$$REST); anonymizing
+        // them would erase the only handle on sibling router members.
+        const scanPattern = rule.restKey ? pattern : anonymousVariadics(pattern);
+        // Literal-method rules (flask add_url_rule, fetch, …) pin the verb
+        // inside the pattern itself; an M constraint would reference an
+        // undefined metavar and void the whole batch's rules.yml.
+        const live = liveConstraints(scanPattern, {
+          M: { regex: rule.methods },
+          ...(rule.receiverPattern ? { R: { regex: rule.receiverPattern } } : {}),
+        });
         rules.push({
           id,
           language,
-          // restKey rules read named multi captures ($$$REST); anonymizing
-          // them would erase the only handle on sibling router members.
-          pattern: rule.restKey ? pattern : anonymousVariadics(pattern),
-          constraints: {
-            M: { regex: rule.methods },
-            ...(rule.receiverPattern ? { R: { regex: rule.receiverPattern } } : {}),
-          },
+          pattern: scanPattern,
+          ...(live ? { constraints: live } : {}),
         });
       }
       groups.push({ rule, prefixIds, matchIds });

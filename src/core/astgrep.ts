@@ -75,6 +75,31 @@ export interface ScanMatch extends AgMatch {
 export const anonymousVariadics = (pattern: string): string =>
   pattern.replace(/\$\$\$[A-Za-z_][A-Za-z0-9_]*/g, () => "$$$");
 
+// ast-grep rejects an entire rules.yml when any rule's `constraints` name a
+// metavar its pattern never defines (exit 8, "Undefined meta var"): one stale
+// rule voids the consolidated scan for the whole batch, and extraction
+// silently reroutes onto per-pattern spawns that re-parse every file for
+// every pattern. Patterns are authoritative, so constraints referencing
+// absent metavars are dead weight — filter them where rules are produced
+// (anchorScanPlan) and again where the rule file is written.
+const metavarIn = (pattern: string, key: string): boolean => {
+  for (let i = pattern.indexOf(`$${key}`); i >= 0; i = pattern.indexOf(`$${key}`, i + 1)) {
+    if (!/[\w$]/.test(pattern[i + 1 + key.length] ?? "")) return true;
+  }
+  return false;
+};
+
+export const liveConstraints = (
+  pattern: string,
+  constraints: NonNullable<ScanRule["constraints"]>,
+): ScanRule["constraints"] => {
+  const out: NonNullable<ScanRule["constraints"]> = {};
+  for (const [key, constraint] of Object.entries(constraints)) {
+    if (metavarIn(pattern, key)) out[key] = constraint;
+  }
+  return Object.keys(out).length ? out : undefined;
+};
+
 const binary = (): string => process.env.FOVEA_AST_GREP ?? "ast-grep";
 
 // One spawnSync probe per binary path, memoized: ensureState used to pay a
@@ -344,12 +369,15 @@ const materializeRuleFile = (rules: readonly ScanRule[]): Promise<string> => {
   if (hit) return hit;
   const pending = (async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-fovea-scan-"));
-    const documents = rules.map(({ id, language, pattern, constraints }) => JSON.stringify({
-      id,
-      language,
-      rule: { pattern },
-      ...(constraints ? { constraints } : {}),
-    }));
+    const documents = rules.map(({ id, language, pattern, constraints }) => {
+      const live = constraints ? liveConstraints(pattern, constraints) : undefined;
+      return JSON.stringify({
+        id,
+        language,
+        rule: { pattern },
+        ...(live ? { constraints: live } : {}),
+      });
+    });
     const rulePath = join(root, "rules.yml");
     await writeFile(rulePath, documents.join("\n---\n"));
     return rulePath;
