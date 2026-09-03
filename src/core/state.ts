@@ -192,7 +192,7 @@ const assembleState = async (
 const buildState = async (root: string): Promise<RepoState> => {
   if (!(await hasAstGrepAsync())) {
     throw new Error(
-      "fovea: `ast-grep` binary not found on PATH (set FOVEA_AST_GREP to override). Install: https://ast-grep.github.io/",
+      "fovea: no usable ast-grep binary (set FOVEA_AST_GREP to override; PATH is checked first, then the packaged @ast-grep/cli dependency). Install: https://ast-grep.github.io/",
     );
   }
   const { fileRoutes } = await loadRepoRules(root);

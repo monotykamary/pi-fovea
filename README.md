@@ -108,7 +108,7 @@ Runtime slash controls:
 
 ## Install
 
-Requires Node.js 20+ and [ast-grep](https://ast-grep.github.io/) on PATH (`brew install ast-grep`, `npm i -g @ast-grep/cli`, or set `FOVEA_AST_GREP=/path/to/sg`).
+Requires Node.js 20+. The install provisions [ast-grep](https://ast-grep.github.io/) automatically through the `@ast-grep/cli` npm optional dependency; an `ast-grep` found on PATH takes precedence over the packaged copy, and `FOVEA_AST_GREP=/path/to/sg` overrides both.
 
 ```sh
 pi install npm:pi-fovea

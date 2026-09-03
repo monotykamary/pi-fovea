@@ -1,14 +1,18 @@
 // Thin runner over the ast-grep CLI. All extraction goes through here.
-// Resolution: FOVEA_AST_GREP env var, then `ast-grep` on PATH.
+// Resolution: FOVEA_AST_GREP env var, then `ast-grep` on PATH, then the
+// packaged @ast-grep/cli optional dependency (the install provisions it; a
+// PATH binary always wins over the packaged copy).
 //
 // Everything is async and gated: a cold build fans chunk invocations out to
 // SPAWN_CONCURRENCY processes instead of serializing spawnSync behind the
 // TUI's event loop; the loop never stalls waiting on a child process.
 
 import { execFile, spawn, spawnSync } from "node:child_process";
+import { accessSync, constants as fsConstants, readFileSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { SPAWN_CONCURRENCY, envInt, mapLimit, spawnGate } from "./asyncutil.js";
 
 export const LANG_BY_EXT: Record<string, string> = {
@@ -100,7 +104,52 @@ export const liveConstraints = (
   return Object.keys(out).length ? out : undefined;
 };
 
-const binary = (): string => process.env.FOVEA_AST_GREP ?? "ast-grep";
+// Binary resolution: FOVEA_AST_GREP wins; otherwise a PATH binary wins over
+// the packaged copy so pinned/custom installs keep working. Resolved once per
+// process — the spawnSync PATH probe must not run per spawn (see the
+// availability memoization below).
+const binary = (): string => process.env.FOVEA_AST_GREP ?? defaultBinary();
+
+let defaultBinaryResolved: string | undefined;
+const defaultBinary = (): string => {
+  if (defaultBinaryResolved) return defaultBinaryResolved;
+  const probe = spawnSync("ast-grep", ["--version"], { encoding: "utf8" });
+  if (!probe.error && probe.status === 0) {
+    availability.set("ast-grep", { ok: true, at: Date.now() });
+    defaultBinaryResolved = "ast-grep";
+  } else {
+    defaultBinaryResolved = packagedAstGrep() ?? "ast-grep";
+  }
+  return defaultBinaryResolved;
+};
+
+// The @ast-grep/cli optional dependency ships the binary beside this package;
+// installers link an executable shim into the parent node_modules/.bin.
+let packagedBinary: string | null | undefined; // undefined = unprobed, null = absent
+const packagedAstGrep = (): string | undefined => {
+  if (packagedBinary !== undefined) return packagedBinary ?? undefined;
+  packagedBinary = null;
+  try {
+    const pkgPath = createRequire(import.meta.url).resolve("@ast-grep/cli/package.json");
+    const dir = dirname(pkgPath);
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { bin?: Record<string, string> | string };
+    const rel = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.["ast-grep"];
+    if (rel) {
+      for (const candidate of [join(dirname(dirname(dir)), ".bin", "ast-grep"), resolve(dir, rel)]) {
+        try {
+          accessSync(candidate, fsConstants.X_OK);
+          packagedBinary = candidate;
+          break;
+        } catch {
+          // Not executable here; try the next candidate.
+        }
+      }
+    }
+  } catch {
+    // Optional dependency not installed; PATH must provide the binary.
+  }
+  return packagedBinary ?? undefined;
+};
 
 // One spawnSync probe per binary path, memoized: ensureState used to pay a
 // ~40ms subprocess on EVERY invocation. Success is sticky; failures re-probe
