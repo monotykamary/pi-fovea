@@ -1,0 +1,7 @@
+query LoadUser($id: ID!, $filter: UserFilter = { active: true }) {
+  ... on Query {
+    user(id: $id, filter: $filter) {
+      id
+    }
+  }
+}

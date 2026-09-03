@@ -38,14 +38,20 @@ export const isBinaryExt = (file: string): boolean =>
   BINARY_EXTS.has(file.split(".").pop()?.toLowerCase() ?? "");
 
 // Non-code files: literals are regex-extracted so config/spec files can join.
-const CONFIG_EXTS = new Set(["yaml", "yml", "json", "toml", "env", "tf", "hcl", "md"]);
+const CONFIG_EXTS = new Set([
+  "yaml", "yml", "json", "toml", "env", "tf", "hcl", "md",
+  // Parsed by the exact protocol readers; kept out of ast-grep language scans.
+  "proto", "graphql", "gql",
+]);
 
 export interface AgMatch {
   file: string;                    // as passed to ast-grep (repo-relative)
   line: number;                    // 1-indexed
   text: string;                    // full matched node text
   single: Record<string, string>;  // $VAR -> text (single metavars)
-  multi: Record<string, string[]>; // $$$VAR -> texts
+  /** Line (1-indexed) of each single capture; 0 when the raw match lacks ranges. */
+  singleLines: Record<string, number>;
+  multi: Record<string, Array<{ text: string; line: number }>>; // $$$VAR -> occurrences
 }
 
 interface ScanConstraint {
@@ -287,8 +293,8 @@ interface RawMatch {
   range: { start: { line: number; column: number } };
   file: string;
   metaVariables?: {
-    single?: Record<string, { text: string }>;
-    multi?: Record<string, Array<{ text: string }>>;
+    single?: Record<string, { text: string; range?: { start: { line: number } } }>;
+    multi?: Record<string, Array<{ text: string; range?: { start: { line: number } } }>>;
   };
 }
 
@@ -296,10 +302,15 @@ interface RawScanMatch extends RawMatch { ruleId: string }
 
 const fromRawMatch = (m: RawMatch): AgMatch => {
   const single: Record<string, string> = {};
-  const multi: Record<string, string[]> = {};
-  for (const [key, value] of Object.entries(m.metaVariables?.single ?? {})) single[key] = value.text;
-  for (const [key, value] of Object.entries(m.metaVariables?.multi ?? {})) multi[key] = value.map((item) => item.text);
-  return { file: m.file, line: m.range.start.line + 1, text: m.text, single, multi };
+  const singleLines: Record<string, number> = {};
+  const multi: Record<string, Array<{ text: string; line: number }>> = {};
+  for (const [key, value] of Object.entries(m.metaVariables?.single ?? {})) {
+    single[key] = value.text;
+    singleLines[key] = value.range ? value.range.start.line + 1 : 0;
+  }
+  for (const [key, value] of Object.entries(m.metaVariables?.multi ?? {}))
+    multi[key] = value.map((item) => ({ text: item.text, line: item.range ? item.range.start.line + 1 : 0 }));
+  return { file: m.file, line: m.range.start.line + 1, text: m.text, single, singleLines, multi };
 };
 
 const scanSupport = new Map<string, { ok: boolean; at: number }>();

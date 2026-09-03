@@ -1,7 +1,8 @@
 // Shared graph model for pi-fovea.
-// Nodes are symbols (functions, methods, classes, ...), files, and route anchors.
+// Nodes are symbols (functions, methods, classes, ...), files, and feature anchors.
 // Edges are undirected conductances between node indices; `kind` records why
-// the edge exists and `w` is the thermal conductance used by diffusion.
+// the edge exists, `evidence` records how it was derived, and `w` is the
+// thermal conductance used by diffusion.
 
 export type NodeKind =
   | "function"
@@ -34,20 +35,57 @@ export interface NodeRec {
   lang: string;      // ast-grep language name, or "config" / "text"
 }
 
+type EdgeStrategy =
+  | "file-membership"
+  | "relative-import"
+  | "python-module"
+  | "go-module-suffix"
+  | "rust-module"
+  | "typescript-tail"
+  | "test-import"
+  | "same-file-symbol"
+  | "imported-symbol"
+  | "globally-unique-symbol"
+  | "signature-extends"
+  | "signature-implements"
+  | "normalized-literal"
+  | "declared-anchor"
+  | "discovered-anchor"
+  | "anchor-membership";
+
+/** Deterministic derivation metadata. This is provenance, not probability. */
+export interface EdgeEvidence {
+  strategy: EdgeStrategy;
+  /** Declarative rule or bounded resolver branch that derived the edge. */
+  rule?: string;
+  /** Exact import, symbol, literal, feature site, or file witness. */
+  source?: string;
+  /** Number of candidates considered by a bounded resolver. */
+  candidates?: number;
+  /** Canonical literal or feature key when one is the exact join witness. */
+  key?: string;
+  implicit?: boolean;
+}
+
 export interface Edge {
   a: number;         // index into Graph.nodes
   b: number;
   kind: EdgeKind;
   w: number;         // conductance >= 0
+  /** Optional for compatibility with callers constructing synthetic graphs. */
+  evidence?: EdgeEvidence;
 }
 
 export interface Anchor {
-  id: string;        // e.g. "GET /api/users/{*}"
-  kind: string;      // "route"
+  id: string;        // e.g. "GET /api/users/{*}" or "RPC users.v1.Users/GetUser"
+  kind: string;      // "route", "rpc", "graphql", "trpc", "channel", ...
   label: string;     // display label
   nodeId: string;    // handler symbol node id, or enclosing node
   file: string;
   line: number;
+  /** Declarative extractor rule for a site; collapsed hubs expose `sources`. */
+  ruleId?: string;
+  sources?: string[];
   implicit?: boolean; // tier-3 discovered shape: half hub gravity, shown with △
 }
 

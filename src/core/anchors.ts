@@ -1,6 +1,7 @@
 // Feature anchors: where a feature touches the outside world. Anchors are
-// extracted by a declarative rule pack (ast-grep patterns + metadata), so new
-// frameworks are added as data. The pack covers five port shapes:
+// extracted by declarative syntax rules (ast-grep patterns + schema readers),
+// so new frameworks are added as inspectable data. HTTP routes cover five
+// port shapes:
 //
 //   1. recv.verb("path", handlers...)        express/koa/gin/echo/chi(net style)
 //   2. verb-annotation on handler            Nest/Flask/FastAPI(+class prefix)
@@ -8,12 +9,15 @@
 //   4. receiver-less route DSL               Rails, Phoenix, Django
 //   5. file-convention routes                Next/SvelteKit/Nuxt (extractFileRoutes)
 //
-// Every captured token still has to validate as a path before it can become a
-// hub — the route string is the real discriminator, the call shape is flavor.
+// Every route token validates as a path. Protocol rules instead require exact
+// identifiers or canonical RPC paths; schema readers consume only declared
+// protobuf and GraphQL grammar. No learned similarity enters either path.
 // Known blind spots (documented in README): Rust proc-macro attributes
-// (actix/rocket) — ast-grep cannot parameterize attribute paths; frameworks
-// with constructor-assigned prefixes (Flask Blueprint, FastAPI APIRouter,
-// chi Mount); tRPC/GraphQL/gRPC have no path token to anchor at all.
+// (actix/rocket), constructor-assigned router prefixes (including Hono
+// sub-apps), router members behind spreads or past the positional slots,
+// client proxies like trpc.post.list.query(), oRPC dynamic clients, Hono
+// app.on with non-standard verbs or path arrays, embedded GraphQL documents,
+// and generated gRPC clients without method paths.
 
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -51,6 +55,22 @@ export interface AnchorRule {
   mountRoot?: boolean;
   /** Synthesized tier-3 rules ship as variant lists (exact arity + trailing $$$H). */
   patterns?: string[];
+  /** Non-HTTP rules prefix an exact key instead of deriving an HTTP verb. */
+  labelPrefix?: string;
+  /** Capture holding that feature key (defaults to P). */
+  keyFrom?: string;
+  /** Full-match validator applied after quotes are removed. */
+  keyPattern?: string;
+  /** Require a source string literal rather than a computed expression. */
+  quotedKey?: boolean;
+  /** Canonicalize a /package.Service/Method gRPC path. */
+  keyNormalization?: "grpc";
+  /** Optional deterministic receiver constraint for protocol declarations. */
+  receiverPattern?: string;
+  /** Path segment prepended to the key when the key names a route stem. */
+  keyPrefix?: string;
+  /** Multi capture holding sibling router members; each procedure anchors at its own line. */
+  restKey?: string;
   /** Discovered rules: half hub gravity until a real join upgrades them. */
   implicit?: boolean;
 }
@@ -90,6 +110,7 @@ const PLACEHOLDER_ONLY = /^(:[A-Za-z_]\w*|\{[A-Za-z_]\w*\}|\[[A-Za-z_]\w*\])$/;
 const METHOD_ALIASES: Record<string, string> = {
   PATH: "ANY", RE_PATH: "ANY", URL: "ANY", MATCH: "ANY", ROOT: "ANY",
   REQUESTMAPPING: "ANY", RESOURCES: "ANY", FORWARD: "ANY",
+  USE: "ANY", ROUTE: "ANY", GROUP: "ANY",
   FETCH: "GET", REDIRECT: "GET", RESPONDREDIRECT: "GET", REDIRECT_TO: "GET",
 };
 
@@ -97,6 +118,28 @@ const deriveVerb = (method: string): string => {
   let up = method.toUpperCase();
   if (up.endsWith("MAPPING")) up = up.slice(0, -"MAPPING".length); // Spring GetMapping → GET
   return METHOD_ALIASES[up] ?? up;
+};
+
+// Object-literal patterns bind positionally and demand a comma after the
+// captured pair, so router members need one variant per position: named
+// single-letter dummy pairs occupy the slots ahead of the captured one
+// (longer metavariable names fail to bind), the trailing $$$REST
+// enumerates every later member, and a comma-free variant covers
+// single-member routers. Members beyond the last slot still anchor through
+// the REST capture of the deepest matching variant; spreads and quoted or
+// computed keys fail closed.
+const ROUTER_OBJECT_SLOTS = 12;
+const routerObjectPatterns = (slots = ROUTER_OBJECT_SLOTS): string[] => {
+  const pair = "$P: $R.$M($$$A)";
+  const variants: string[] = [`$F({ ${pair} })`];
+  for (let position = 0; position < slots; position++) {
+    const dummies = position
+      ? `${Array.from({ length: position }, (_, index) =>
+          `$${String.fromCharCode(65 + index * 2)}: $${String.fromCharCode(66 + index * 2)}`).join(", ")}, `
+      : "";
+    variants.push(`$F({ ${dummies}${pair}, $$$REST })`);
+  }
+  return variants;
 };
 
 export const DEFAULT_PACK: AnchorRule[] = [
@@ -256,6 +299,110 @@ export const DEFAULT_PACK: AnchorRule[] = [
     methods: "^route$",
     kind: "route",
   },
+  {
+    id: "grpc-method-path-first",
+    langs: ["TypeScript", "Tsx", "JavaScript", "Python"],
+    pattern: "$R.$M($P, $$$H)",
+    methods: "^(makeUnaryRequest|makeClientStreamRequest|makeServerStreamRequest|makeBidiStreamRequest|unary_unary|unary_stream|stream_unary|stream_stream)$",
+    kind: "rpc",
+    labelPrefix: "RPC",
+    keyPattern: "^/[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*/[A-Za-z_]\\w*$",
+    keyNormalization: "grpc",
+    quotedKey: true,
+  },
+  {
+    id: "grpc-go-method-path-second",
+    langs: ["Go"],
+    pattern: "$R.$M($C, $P, $$$H)",
+    methods: "^(Invoke|NewStream)$",
+    kind: "rpc",
+    labelPrefix: "RPC",
+    keyPattern: "^/[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*/[A-Za-z_]\\w*$",
+    keyNormalization: "grpc",
+    quotedKey: true,
+  },
+  {
+    id: "trpc-procedure-declaration",
+    langs: ["TypeScript", "Tsx", "JavaScript"],
+    // Standalone route consts cover routers whose members are plain
+    // references (documenso-style split files). The receiver must root at
+    // the builder `t` or a *Procedure factory; `trpc.post.list.query()`
+    // client proxies fail closed instead of anchoring a nested name.
+    patterns: [
+      ...routerObjectPatterns(),
+      "const $P = $R.$M($$$A)",
+      "const $P: $T = $R.$M($$$A)",
+    ],
+    methods: "^(query|mutation|subscription)$",
+    kind: "trpc",
+    labelPrefix: "TRPC",
+    keyPattern: "^[A-Za-z_$][\\w$]*$",
+    receiverPattern: "^(?:t(?:\\.procedure|$)|[A-Za-z_$]*[Pp]rocedure)",
+    restKey: "REST",
+  },
+  {
+    id: "trpc-client-call",
+    langs: ["TypeScript", "Tsx", "JavaScript"],
+    pattern: "trpc.$P.$M($$$A)",
+    methods: "^(query|mutate|subscribe)$",
+    kind: "trpc",
+    labelPrefix: "TRPC",
+    keyPattern: "^[A-Za-z_$][\\w$]*$",
+  },
+  {
+    // oRPC procedures: object members of routers or standalone exports, with
+    // the receiver chain rooted at the `os` builder. Contract-only `oc.*`
+    // shapes and client calls stay unlinked rather than guessed.
+    id: "orpc-procedure-declaration",
+    langs: ["TypeScript", "Tsx", "JavaScript"],
+    patterns: [
+      ...routerObjectPatterns(),
+      "const $P = $R.$M($$$A)",
+      "const $P: $T = $R.$M($$$A)",
+    ],
+    methods: "^(route|handler)$",
+    kind: "orpc",
+    labelPrefix: "ORPC",
+    keyPattern: "^[A-Za-z_$][\\w$]*$",
+    receiverPattern: "^os(?:\\.|$)",
+    restKey: "REST",
+  },
+  {
+    // Hono-style app.on("GET", "/path", h). Non-HTTP verbs and array paths
+    // fail closed: they anchor nothing rather than guessing.
+    id: "http-method-route-on",
+    langs: ["TypeScript", "Tsx", "JavaScript"],
+    patterns: ['$R.$M("$V", $P, $$$H)', "$R.$M('$V', $P, $$$H)"],
+    methods: "^on$",
+    kind: "route",
+    verbFrom: "V",
+  },
+  {
+    // Hono RPC client: client.posts.$get() — the property is the route
+    // stem, so it joins the server-declared hub. Deeper chains, computed
+    // segments, and non-`client` receivers stay unanchored.
+    id: "hono-rpc-client-call",
+    langs: ["TypeScript", "Tsx", "JavaScript"],
+    pattern: "$R.$P.$M($$$A)",
+    methods: "^\\$(get|post|put|delete|patch|head|options|all)$",
+    kind: "route",
+    receiverPattern: "^client$",
+    labelPrefix: "GET",
+    keyFrom: "P",
+    keyPattern: "^[A-Za-z_$][\\w$]*$",
+    keyPrefix: "/",
+    verbFrom: "M",
+  },
+  {
+    id: "message-channel-call",
+    langs: ["TypeScript", "Tsx", "JavaScript", "Python", "Go", "Rust"],
+    pattern: "$R.$M($P, $$$H)",
+    methods: "^(publish|subscribe)$",
+    kind: "channel",
+    labelPrefix: "CHANNEL",
+    keyPattern: "^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,159}$",
+    quotedKey: true,
+  },
 ];
 
 export interface AnchorDraft extends Anchor {}
@@ -274,6 +421,40 @@ interface AnchorMatchGroup {
   matches: AgMatch[];
 }
 
+// Sibling router members arrive as raw property text from the $$$REST multi
+// capture. Walk the value chain segment by segment: ROOT.seg(...).METHOD( —
+// a method-named segment must be the final call before the handler body.
+// Spreads, shorthand, quoted or computed keys, nested routers, and non-method
+// chains fail closed and anchor nothing.
+const REST_PROPERTY_HEAD = /^([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*)/;
+const restProcedure = (
+  text: string,
+  methods: RegExp,
+): { key: string; root: string; method: string } | undefined => {
+  const head = REST_PROPERTY_HEAD.exec(text);
+  if (!head) return undefined;
+  let i = head[0].length;
+  for (;;) {
+    if (text[i] !== ".") return undefined;
+    i++;
+    const name = /^([A-Za-z_$][\w$]*)/.exec(text.slice(i));
+    if (!name) return undefined;
+    i += name[0].length;
+    const identifier = name[1]!;
+    if (methods.test(identifier)) {
+      return text[i] === "(" ? { key: head[1]!, root: head[2]!, method: identifier } : undefined;
+    }
+    if (text[i] === "(") {
+      let depth = 0;
+      do {
+        if (text[i] === "(") depth++;
+        else if (text[i] === ")") depth--;
+        i++;
+      } while (i < text.length && depth > 0);
+    }
+  }
+};
+
 const anchorsFromGroups = (
   groups: readonly AnchorMatchGroup[],
   resolveEnclosing: (file: string, line: number) => string | undefined,
@@ -281,45 +462,104 @@ const anchorsFromGroups = (
   const out: AnchorDraft[] = [];
   for (const { rule, prefixes: prefixMatches, matches } of groups) {
     const methodRe = compileMethods(rule.methods);
+    const receiverRe = rule.receiverPattern ? new RegExp(rule.receiverPattern) : undefined;
+    const keyRe = rule.keyPattern ? new RegExp(rule.keyPattern) : undefined;
+    const roleAware = rule.kind === "channel" || rule.kind === "trpc" || rule.kind === "orpc";
     const prefixes = new Map<string, string>();
     for (const match of prefixMatches) {
       const prefix = match.single.P?.trim();
       if (prefix !== undefined && !prefixes.has(match.file)) prefixes.set(match.file, unquote(prefix));
     }
     for (const match of matches) {
+      // Router members after the captured first slot anchor from the $$$REST
+      // multi capture, each at its own line; anything the segment walk
+      // cannot prove fails closed.
+      if (rule.restKey && rule.labelPrefix) {
+        for (const sibling of match.multi[rule.restKey] ?? []) {
+          const member = restProcedure(sibling.text, methodRe);
+          if (!member) continue;
+          if (keyRe && !keyRe.test(member.key)) continue;
+          if (receiverRe && !receiverRe.test(member.root)) continue;
+          const siblingLine = sibling.line || match.line;
+          const restLabel = `${rule.labelPrefix} ${member.key}`;
+          out.push({
+            id: restLabel,
+            kind: rule.kind,
+            label: restLabel,
+            nodeId: resolveEnclosing(match.file, siblingLine) ?? `file:${match.file}`,
+            file: match.file,
+            line: siblingLine,
+            ruleId: roleAware ? `${rule.id}:${member.method.toLowerCase()}` : rule.id,
+          });
+        }
+      }
       const method = match.single.M;
-      const pathLike = match.single.P;
-      if (!method || !pathLike || !methodRe.test(method)) continue;
-      const prefix = prefixes.get(match.file);
-      let raw = prefix !== undefined && prefix !== "" ? joinRoute(prefix, unquote(pathLike)) : unquote(pathLike);
-      if (rule.mountRoot && !raw.startsWith("/")) raw = "/" + raw.replace(/^\/+/, "");
-      const verbInPath = VERB_IN_PATH.exec(raw);
-      let verbOverride: string | undefined;
-      if (verbInPath) {
-        verbOverride = verbInPath[1]!.toUpperCase();
-        raw = verbInPath[2]!;
-      }
-      if (!PATH_TOKEN_RE.test(raw) && !PLACEHOLDER_ONLY.test(raw)) continue;
-      let httpMethod: string;
-      if (rule.verbFrom) {
-        const verb = match.single[rule.verbFrom];
-        if (!verb || !HTTP_VERB_RE.test(verb)) continue;
-        httpMethod = verb.toUpperCase();
+      if (!method || !methodRe.test(method)) continue;
+      if (receiverRe && (!match.single.R || !receiverRe.test(match.single.R))) continue;
+
+      let label: string;
+      if (rule.labelPrefix) {
+        const captured = match.single[rule.keyFrom ?? "P"];
+        if (!captured || (rule.quotedKey && !QUOTED_RE.test(captured.trim()))) continue;
+        let key = unquote(captured);
+        if (keyRe && !keyRe.test(key)) continue;
+        if (rule.keyNormalization === "grpc") key = key.replace(/^\/+/, "");
+        let prefix = rule.labelPrefix;
+        if (rule.verbFrom) {
+          const verb = (match.single[rule.verbFrom] ?? "").replace(/^\$/, "");
+          if (!verb || !HTTP_VERB_RE.test(verb)) continue;
+          prefix = verb.toUpperCase();
+        }
+        label = `${prefix} ${rule.keyPrefix ?? ""}${key}`;
       } else {
-        httpMethod = verbOverride ?? deriveVerb(method);
+        const pathLike = match.single.P;
+        if (!pathLike) continue;
+        const prefix = prefixes.get(match.file);
+        let raw = prefix !== undefined && prefix !== "" ? joinRoute(prefix, unquote(pathLike)) : unquote(pathLike);
+        if (rule.mountRoot && !raw.startsWith("/")) raw = "/" + raw.replace(/^\/+/, "");
+        const verbInPath = VERB_IN_PATH.exec(raw);
+        let verbOverride: string | undefined;
+        if (verbInPath) {
+          verbOverride = verbInPath[1]!.toUpperCase();
+          raw = verbInPath[2]!;
+        }
+        if (!PATH_TOKEN_RE.test(raw) && !PLACEHOLDER_ONLY.test(raw)) continue;
+        let httpMethod: string;
+        if (rule.verbFrom) {
+          const verb = match.single[rule.verbFrom];
+          if (!verb || !HTTP_VERB_RE.test(verb)) continue;
+          httpMethod = verb.toUpperCase();
+        } else {
+          httpMethod = verbOverride ?? deriveVerb(method);
+        }
+        label = `${httpMethod} ${normalizeLiteral(raw, "path")}`;
       }
-      const norm = normalizeLiteral(raw, "path");
-      const label = `${httpMethod} ${norm}`;
-      const enclosing = resolveEnclosing(match.file, match.line);
+      // The captured key sits on its own line even when the call spans
+      // many; anchors point there, not at the call head.
+      const anchorLine = match.singleLines[rule.keyFrom ?? "P"] ?? match.line;
+      const enclosing = resolveEnclosing(match.file, anchorLine);
+      const nodeId = enclosing ?? `file:${match.file}`;
       out.push({
         id: label,
         kind: rule.kind,
         label,
-        nodeId: enclosing ?? `file:${match.file}`,
+        nodeId,
         file: match.file,
-        line: match.line,
+        line: anchorLine,
+        ruleId: roleAware ? `${rule.id}:${method.toLowerCase()}` : rule.id,
         ...(rule.implicit ? { implicit: true } : {}),
       });
+      if (rule.keyNormalization === "grpc") {
+        const methodPath = label.slice("RPC ".length);
+        const slash = methodPath.lastIndexOf("/");
+        if (slash > 0) {
+          const serviceLabel = `RPC SERVICE ${methodPath.slice(0, slash)}`;
+          out.push({
+            id: serviceLabel, kind: "rpc-service", label: serviceLabel, nodeId,
+            file: match.file, line: match.line, ruleId: `${rule.id}:service`,
+          });
+        }
+      }
     }
   }
   return dedupeAnchors(out);
@@ -357,8 +597,13 @@ export const anchorScanPlan = (files: string[], pack: AnchorRule[] = DEFAULT_PAC
         rules.push({
           id,
           language,
-          pattern: anonymousVariadics(pattern),
-          constraints: { M: { regex: rule.methods } },
+          // restKey rules read named multi captures ($$$REST); anonymizing
+          // them would erase the only handle on sibling router members.
+          pattern: rule.restKey ? pattern : anonymousVariadics(pattern),
+          constraints: {
+            M: { regex: rule.methods },
+            ...(rule.receiverPattern ? { R: { regex: rule.receiverPattern } } : {}),
+          },
         });
       }
       groups.push({ rule, prefixIds, matchIds });
@@ -510,6 +755,7 @@ export const extractFileRoutes = async (
           nodeId: `file:${file}`,
           file,
           line: 0,
+          ruleId: rule.id,
         });
       }
     }

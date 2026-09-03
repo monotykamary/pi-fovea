@@ -5,7 +5,7 @@ import { isTestFile } from "./extract.js";
 import { buildJoinIndex, type JoinIndex } from "./join.js";
 import type { AnchorDraft } from "./anchors.js";
 import type { FileFacts } from "./build.js";
-import type { Edge, Graph, LiteralSite, NodeRec } from "./types.js";
+import type { Edge, EdgeEvidence, Graph, LiteralSite, NodeRec } from "./types.js";
 
 const CODE_EXTS_BY_LANGFAMILY: Record<string, string[]> = {
   ts: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
@@ -77,61 +77,80 @@ const buildImportIndex = (files: string[]): ImportIndex => {
   return { fileSet, filesByDir, goDirsBySuffix, rsByBase, tsByTailStem };
 };
 
+interface ImportResolution {
+  file: string;
+  evidence: EdgeEvidence;
+}
+
 const resolveImportToFile = (
   spec: string,
   fromFile: string,
   index: ImportIndex,
-): string | undefined => {
+): ImportResolution | undefined => {
   const { fileSet } = index;
   const fam = langFamily(fromFile);
+  const exact = (candidates: string[], strategy: EdgeEvidence["strategy"]): ImportResolution | undefined => {
+    const hits = [...new Set(candidates)].filter((candidate) => fileSet.has(candidate));
+    return hits.length
+      ? { file: hits[0]!, evidence: { strategy, rule: "import-resolve", source: spec, candidates: hits.length } }
+      : undefined;
+  };
   if (spec.startsWith("./") || spec.startsWith("../")) {
     let base = posix.normalize(posix.join(posix.dirname(fromFile), spec));
     // NodeNext convention: TS files import "./sibling.js" — the .js refers to
     // the .ts source. Strip a runtime extension before probing.
     base = base.replace(/\.(?:[cm]?js|jsx)$/, "");
+    const candidates: string[] = [];
     for (const ext of CODE_EXTS_BY_LANGFAMILY[fam] ?? []) {
-      if (fileSet.has(base + ext)) return base + ext;
-      if (fileSet.has(`${base}/index${ext}`)) return `${base}/index${ext}`;
+      candidates.push(base + ext, `${base}/index${ext}`);
     }
-    if (fileSet.has(base)) return base;
-    return undefined;
+    candidates.push(base);
+    return exact(candidates, "relative-import");
   }
   if (fam === "py") {
     const p = spec.replace(/\./g, "/");
-    for (const cand of [`${p}.py`, `${p}/__init__.py`]) if (fileSet.has(cand)) return cand;
-    return undefined;
+    return exact([`${p}.py`, `${p}/__init__.py`], "python-module");
   }
   if (fam === "go") {
     const segs = spec.split("/").filter(Boolean);
     for (let k = 1; k <= Math.min(3, segs.length); k++) {
       const suffix = segs.slice(-k).join("/");
       const matches = (index.goDirsBySuffix.get(suffix) ?? []).filter(
-        (d) => d === suffix || d.endsWith(`/${suffix}`),
+        (directory) => directory === suffix || directory.endsWith(`/${suffix}`),
       );
       if (matches.length === 1) {
-        const dir = matches[0]!;
-        const inDir = index.filesByDir.get(dir) ?? [];
-        if (inDir.length) return inDir[0];
+        const inDir = index.filesByDir.get(matches[0]!) ?? [];
+        if (inDir.length) {
+          return {
+            file: inDir[0]!,
+            evidence: { strategy: "go-module-suffix", rule: "go-package-representative", source: spec, candidates: inDir.length },
+          };
+        }
       }
     }
     return undefined;
   }
   if (fam === "rs") {
     const modPath = spec.replace(/^crate::|^self::/, "").replace(/::/g, "/");
-    for (const cand of [`src/${modPath}.rs`, `${modPath}.rs`]) if (fileSet.has(cand)) return cand;
+    const direct = exact([`src/${modPath}.rs`, `${modPath}.rs`], "rust-module");
+    if (direct) return direct;
     const baseName = basename(modPath);
     const hits = (index.rsByBase.get(baseName) ?? []).filter(
-      (f) => f === `${baseName}.rs` || f.endsWith(`/${baseName}.rs`) || f.endsWith(`/${baseName}/mod.rs`),
+      (file) => file === `${baseName}.rs` || file.endsWith(`/${baseName}.rs`) || file.endsWith(`/${baseName}/mod.rs`),
     );
-    return hits.length === 1 ? hits[0] : undefined;
+    return hits.length === 1
+      ? { file: hits[0]!, evidence: { strategy: "rust-module", rule: "import-resolve", source: spec, candidates: hits.length } }
+      : undefined;
   }
-  // ts bare specifier: node_modules or aliased; try a tail match.
+  // TS bare specifier: node_modules or aliased; try a tail match.
   const tail = spec.split("/").filter(Boolean).join("/");
   const stem = tail.split("/").pop() ?? tail;
   const hits = (index.tsByTailStem.get(stem) ?? []).filter(
-    (f) => f.endsWith(`/${tail}.ts`) || f.endsWith(`/${tail}/index.ts`),
+    (file) => file.endsWith(`/${tail}.ts`) || file.endsWith(`/${tail}/index.ts`),
   );
-  return hits.length === 1 ? hits[0] : undefined;
+  return hits.length === 1
+    ? { file: hits[0]!, evidence: { strategy: "typescript-tail", rule: "import-resolve", source: spec, candidates: hits.length } }
+    : undefined;
 };
 
 const addNode = (nodes: NodeRec[], seen: Map<string, number>, rec: NodeRec): number => {
@@ -160,9 +179,9 @@ export const assembleGraphWithIndex = async (
   const byFile = new Map<string, number[]>();
   const fileIdx = new Map<string, number>();
 
-  const pushEdge = (a: number, b: number, kind: Edge["kind"], w: number): void => {
+  const pushEdge = (a: number, b: number, kind: Edge["kind"], w: number, evidence: EdgeEvidence): void => {
     if (a === b) return;
-    edges.push({ a, b, kind, w });
+    edges.push({ a, b, kind, w, evidence });
   };
 
   // File nodes first (stable for enclosing fallback + sketch grouping).
@@ -183,7 +202,7 @@ export const assembleGraphWithIndex = async (
     for (const s of f.symbols) {
       const idx = addNode(nodes, seen, { id: `${s.name}@${s.file}`, ...s });
       (byFile.get(rel) ?? byFile.set(rel, []).get(rel)!).push(idx);
-      pushEdge(fileIdx.get(rel)!, idx, "contains", 1.0);
+      pushEdge(fileIdx.get(rel)!, idx, "contains", 1.0, { strategy: "file-membership", rule: "symbol-contained-by-file", source: rel });
       const key = `${rel}:${s.line}`;
       if (!symIdxByFileLine.has(key)) symIdxByFileLine.set(key, idx);
     }
@@ -220,19 +239,24 @@ export const assembleGraphWithIndex = async (
   const importIndex = buildImportIndex(files);
 
   // Import edges (file-level, low conductance backbone) + tests wiring.
-  const importTargets = new Map<string, string[]>();
+  const importTargets = new Map<string, ImportResolution[]>();
   await forEachChunked(files, 512, (rel) => {
     const f = facts(rel);
     if (!f) return;
     for (const imp of f.imports) {
       const target = resolveImportToFile(imp.spec, rel, importIndex);
-      if (!target || target === rel) continue;
-      pushEdge(fileIdx.get(rel)!, fileIdx.get(target)!, "imports", 0.3);
+      if (!target || target.file === rel) continue;
+      pushEdge(fileIdx.get(rel)!, fileIdx.get(target.file)!, "imports", 0.3, target.evidence);
       (importTargets.get(rel) ?? importTargets.set(rel, []).get(rel)!).push(target);
     }
     if (isTestFile(rel)) {
-      for (const t of importTargets.get(rel) ?? []) {
-        pushEdge(fileIdx.get(rel)!, fileIdx.get(t)!, "tests", 0.6);
+      for (const target of importTargets.get(rel) ?? []) {
+        pushEdge(fileIdx.get(rel)!, fileIdx.get(target.file)!, "tests", 0.6, {
+          strategy: "test-import",
+          rule: "test-subject-import",
+          source: target.evidence.source,
+          candidates: target.evidence.candidates,
+        });
       }
     }
   });
@@ -244,30 +268,50 @@ export const assembleGraphWithIndex = async (
   await forEachChunked(files, 256, (rel) => {
     const f = facts(rel);
     if (!f) return;
-    const imported = new Set(importTargets.get(rel) ?? []);
+    const imported = new Set((importTargets.get(rel) ?? []).map((target) => target.file));
     for (const call of f.calls) {
       const cands = byName.get(call.callee.toLowerCase()) ?? [];
       if (!cands.length || cands.length > 48) continue;
+      let strategy: EdgeEvidence["strategy"] = "same-file-symbol";
       let chosen: number[] = cands.filter((i) => nodes[i]!.file === rel);
-      if (!chosen.length) chosen = cands.filter((i) => imported.has(nodes[i]!.file));
-      if (!chosen.length && cands.length === 1) chosen = cands;
+      if (!chosen.length) {
+        strategy = "imported-symbol";
+        chosen = cands.filter((i) => imported.has(nodes[i]!.file));
+      }
+      if (!chosen.length && cands.length === 1) {
+        strategy = "globally-unique-symbol";
+        chosen = cands;
+      }
       if (!chosen.length || chosen.length > 3) continue;
       const w = cands.length <= 8 ? 0.7 : cands.length <= 24 ? 0.45 : 0.25;
       const from = enclosingIdx(rel, call.line);
-      for (const to of chosen) pushEdge(from, to, "invokes", w);
+      for (const to of chosen) {
+        pushEdge(from, to, "invokes", w, { strategy, rule: "call-target-resolution", source: call.callee, candidates: cands.length });
+      }
     }
   });
 
   // Inherits edges from class signatures (TS/py style visible on the sig line).
-  nodes.forEach((n, i) => {
-    if (n.kind !== "class") return;
-    for (const m of n.sig.matchAll(/extends\s+([A-Za-z_$][\w$.]*)/g)) {
-      for (const to of byName.get(m[1]!.toLowerCase()) ?? []) pushEdge(i, to, "inherits", 0.9);
+  nodes.forEach((node, i) => {
+    if (node.kind !== "class") return;
+    for (const match of node.sig.matchAll(/extends\s+([A-Za-z_$][\w$.]*)/g)) {
+      const candidates = byName.get(match[1]!.toLowerCase()) ?? [];
+      for (const to of candidates) {
+        pushEdge(i, to, "inherits", 0.9, {
+          strategy: "signature-extends", rule: "extends-clause", source: match[1]!, candidates: candidates.length,
+        });
+      }
     }
-    const impl = /implements\s+([A-Za-z_$][\w$.,\s]*)/.exec(n.sig);
+    const impl = /implements\s+([A-Za-z_$][\w$.,\s]*)/.exec(node.sig);
     if (impl) {
       for (const raw of impl[1]!.split(",")) {
-        for (const to of byName.get(raw.trim().toLowerCase()) ?? []) pushEdge(i, to, "inherits", 0.9);
+        const name = raw.trim();
+        const candidates = byName.get(name.toLowerCase()) ?? [];
+        for (const to of candidates) {
+          pushEdge(i, to, "inherits", 0.9, {
+            strategy: "signature-implements", rule: "implements-clause", source: name, candidates: candidates.length,
+          });
+        }
       }
     }
   });
@@ -276,45 +320,67 @@ export const assembleGraphWithIndex = async (
   const allSites: LiteralSite[] = [];
   for (const f of factValues()) for (const literal of f.literals) allSites.push(literal);
   const joinIdx = buildJoinIndex(allSites, (file, line) => enclosingIdx(file, line));
-  for (const je of joinIdx.edges) pushEdge(je.a, je.b, "join", je.w);
+  for (const edge of joinIdx.edges) pushEdge(edge.a, edge.b, "join", edge.w, edge.evidence);
 
-  // Anchors: ONE node per feature route, not per site. Server registration
-  // and every client call of "POST /auth/login" are occurrences of the same
-  // feature; the anchor hub is where they meet. Site conductance decays with
-  // sqrt(count) so a route consumed everywhere doesn't become a gravity well.
+  // Anchors: one node per exact feature id, not per site. Registrations, schema
+  // declarations, and consumers carrying that id meet at the same hub. Site
+  // conductance decays with sqrt(count) so a common feature cannot dominate.
   const drafts: AnchorDraft[] = [];
   for (const rel of files) {
     const f = facts(rel);
     if (f) for (const anchor of f.anchors) drafts.push(anchor);
   }
   const draftsByLabel = new Map<string, AnchorDraft[]>();
-  for (const a of drafts) {
-    (draftsByLabel.get(a.id) ?? draftsByLabel.set(a.id, []).get(a.id)!).push(a);
+  for (const anchor of drafts) {
+    (draftsByLabel.get(anchor.id) ?? draftsByLabel.set(anchor.id, []).get(anchor.id)!).push(anchor);
   }
   const anchors: Graph["anchors"] = [];
   for (const [label, sites] of draftsByLabel) {
     const first = sites[0]!;
-    const filesOf = [...new Set(sites.map((s) => s.file))];
+    const filesOf = [...new Set(sites.map((site) => site.file))];
+    const sources = [...new Set(sites.map((site) => site.ruleId).filter((source): source is string => !!source))].sort();
     // A hub is implicit only when EVERY site came from a discovered rule — a
-    // match by any real rule upgrades it back to first-class instantly.
-    const hubImplicit = sites.every((s) => s.implicit === true);
-    anchors.push({ id: label, kind: first.kind, label: sites.length > 1 ? `${label} · ${sites.length} sites` : label, nodeId: first.nodeId, file: first.file, line: first.line, ...(hubImplicit ? { implicit: true } : {}) });
+    // match by any declared rule upgrades it back to first-class instantly.
+    const hubImplicit = sites.every((site) => site.implicit === true);
+    anchors.push({
+      id: label,
+      kind: first.kind,
+      label: sites.length > 1 ? `${label} · ${sites.length} sites` : label,
+      nodeId: first.nodeId,
+      file: first.file,
+      line: first.line,
+      ...(sources.length ? { sources } : {}),
+      ...(hubImplicit ? { implicit: true } : {}),
+    });
     const idx = addNode(nodes, seen, {
       id: `anchor:${label}`, name: label, kind: "anchor", file: first.file, line: first.line,
       sig: `${hubImplicit ? "(△ discovered) " : ""}${sites.length > 1 ? `${label} (${sites.length} sites)` : label}`, lang: "anchor",
     });
     (byFile.get(first.file) ?? byFile.set(first.file, []).get(first.file)!).push(idx);
-    // Tier-3 hubs prove themselves at half conductance; a later literal join
-    // against a first-class hub can still warm them via the channel edges.
     const w = (hubImplicit ? 0.5 : 1) / Math.sqrt(sites.length);
-    for (const s of sites) {
-      const handler = seen.get(s.nodeId) ?? fileIdx.get(s.file)!;
-      pushEdge(idx, handler, "anchors", w);
+    for (const site of sites) {
+      const handler = seen.get(site.nodeId) ?? fileIdx.get(site.file)!;
+      pushEdge(idx, handler, "anchors", w, {
+        strategy: site.implicit ? "discovered-anchor" : "declared-anchor",
+        rule: site.ruleId ?? "legacy-anchor",
+        source: `${site.file}:${site.line}`,
+        candidates: sites.length,
+        key: label,
+        ...(site.implicit ? { implicit: true } : {}),
+      });
     }
-    // A multi-file route binds its files too (the feature's file hood).
     if (filesOf.length > 1 && filesOf.length <= 12) {
       const fw = 0.35 / Math.sqrt(filesOf.length);
-      for (const f of filesOf) pushEdge(idx, fileIdx.get(f)!, "anchors", fw);
+      for (const file of filesOf) {
+        pushEdge(idx, fileIdx.get(file)!, "anchors", fw, {
+          strategy: "anchor-membership",
+          rule: "feature-file-membership",
+          source: file,
+          candidates: filesOf.length,
+          key: label,
+          ...(hubImplicit ? { implicit: true } : {}),
+        });
+      }
     }
   }
 

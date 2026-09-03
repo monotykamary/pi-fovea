@@ -18,6 +18,8 @@ export interface FoveaSession {
   t: number;
   seeds: number[];
   seedNote: string;
+  /** Ordered weighted graph generation that owns seeds and Chebyshev vectors. */
+  generation: string;
   focusKey: string;
   scope: FocusScope;
   disclosed: Set<string>;
@@ -54,6 +56,7 @@ export const getSession = (root: string): FoveaSession => {
     t: FOCUS_T0,
     seeds: [],
     seedNote: "",
+    generation: "",
     focusKey: "",
     scope: {},
     disclosed: new Set<string>(),
@@ -91,6 +94,19 @@ export const observeSessionPaths = (root: string, paths: readonly string[]): str
     if (scope) session.syncScopes.add(scope);
   }
   return [...session.syncScopes].sort();
+};
+
+/** Drop index-addressed focus state while preserving attention and obligations. */
+export const clearSessionFocus = (session: FoveaSession): void => {
+  session.t = FOCUS_T0;
+  session.seeds = [];
+  session.seedNote = "";
+  session.generation = "";
+  session.focusKey = "";
+  session.scope = {};
+  session.disclosed.clear();
+  session.tk = [];
+  session.tkKey = "";
 };
 
 // `/new` and friends: same repo, fresh eyes.

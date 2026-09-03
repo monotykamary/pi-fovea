@@ -219,7 +219,8 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     await commands.get("fovea")!.handler("status", ctx);
     const message = String(notify.mock.calls[0]?.[0]);
     expect(message).toMatch(/pi-fovea \d+\.\d+\.\d+/);
-    expect(message).toContain("tracked files indexed");
+    expect(message).toContain("supported files selected");
+    expect(message).toMatch(/\((git|walk)\/(complete|partial|truncated)\)/);
     expect(message).toContain("production anchors");
     expect(message).toContain("sync enabled");
     expect(message).toContain("grep augment");

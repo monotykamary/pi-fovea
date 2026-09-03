@@ -13,7 +13,7 @@
 // the rendered field, nothing else, so it composes with head/grep/$().
 
 import { statSync } from "node:fs";
-import { ensureState, sketch, focus, dwell, impact } from "./src/core/ops.js";
+import { coverageSummary, ensureState, sketch, focus, dwell, impact } from "./src/core/ops.js";
 import { aggregateFiles, posterior, promote } from "./src/core/discover.js";
 import { DEFAULT_PACK } from "./src/core/anchors.js";
 
@@ -61,7 +61,7 @@ try {
     const unreadable = Array.isArray(s.details.extractionUnreadable) ? s.details.extractionUnreadable.length : 0;
     const oversized = Array.isArray(s.details.extractionOversized) ? s.details.extractionOversized.length : 0;
     const generated = Array.isArray(s.details.extractionGenerated) ? s.details.extractionGenerated.length : 0;
-    out = `${s.details.files} files, ${s.details.nodes} symbols, ${s.details.productionAnchors ?? s.details.anchors} production anchors` +
+    out = `${coverageSummary(s.details)}, ${s.details.nodes} symbols, ${s.details.productionAnchors ?? s.details.anchors} production anchors` +
       (testAnchors ? `, ${testAnchors} test/fixture anchors collapsed` : "") +
       (failed ? `, !${failed} files failed extraction` : "") +
       (unreadable ? `, !${unreadable} files unreadable` : "") +

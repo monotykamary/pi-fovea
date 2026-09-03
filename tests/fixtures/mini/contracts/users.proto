@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package users.v1;
+
+// service Guessed { rpc Wrong(Ghost) returns (Ghost); }
+/* message Ghost { string value = 1; } */
+service Users {
+  rpc GetUser(GetUserRequest) returns (User);
+}
+
+message GetUserRequest { string id = 1; }
+message User { string id = 1; }
+message UserList {
+  repeated User users = 1;
+  optional User featured = 2;
+  map<string, User> by_id = 3;
+}

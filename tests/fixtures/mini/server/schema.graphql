@@ -1,0 +1,24 @@
+# query Guessed { ghost }
+"""type Ghost { value: String }"""
+type Query {
+  user(id: ID!, filter: UserFilter): User
+}
+
+input UserFilter {
+  active: Boolean!
+}
+
+type Subscription {
+  userChanged: User
+}
+
+enum UserRole { ADMIN USER }
+scalar DateTime
+interface Timestamped { createdAt: DateTime }
+union UserResult = User | NotFound
+type NotFound { message: String }
+type User implements Timestamped {
+  id: ID!
+  role: UserRole
+  createdAt: DateTime
+}

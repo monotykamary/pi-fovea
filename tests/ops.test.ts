@@ -40,6 +40,9 @@ describe.skipIf(!hasAstGrep())("fovea ops on the minimonorepo", () => {
     expect(kinds.has("join")).toBe(true);
     expect(kinds.has("contains")).toBe(true);
     expect(kinds.has("invokes")).toBe(true);
+    expect(s.graph.edges.every((edge) =>
+      !!edge.evidence?.strategy && !!edge.evidence.rule && !!edge.evidence.source,
+    )).toBe(true);
     // a join edge crossing server -> web or server -> openapi exists
     const cross = s.graph.edges.some((e) => {
       if (e.kind !== "join") return false;
@@ -119,6 +122,39 @@ describe.skipIf(!hasAstGrep())("fovea ops on the minimonorepo", () => {
     const r = await focus(FIXTURE, "loadUser", 1600);
     expect(r.text).toContain("← caller");
     expect(r.text).toContain("GetUserHandler");
+    expect(r.text).toContain("call-target-resolution");
+    const direct = (r.details.nodes as Array<{ relation?: string; evidence?: { strategy: string; rule: string; source: string } }>)
+      .find((node) => node.relation?.includes("caller"));
+    expect(direct?.evidence).toMatchObject({ rule: "call-target-resolution", source: "LoadUser" });
+  });
+
+  it("focuses exact protocol feature ids across declarations and clients", async () => {
+    const map = await sketch(FIXTURE, 2000);
+    for (const feature of [
+      "⚑ RPC users.v1.Users/GetUser",
+      "⚑ RPC SERVICE users.v1.Users",
+      "⚑ GRAPHQL QUERY user",
+      "⚑ TRPC loadUser",
+      "⚑ CHANNEL users.changed",
+    ]) expect(map.text).toContain(feature);
+
+    for (const [query, expected] of [
+      ["RPC users.v1.Users/GetUser", ["contracts/users.proto", "web/users.grpc.ts"]],
+      ["GRAPHQL QUERY user", ["server/schema.graphql", "web/load-user.graphql"]],
+      ["TRPC loadUser", ["server/trpc.ts", "web/trpc-client.ts"]],
+      ["CHANNEL users.changed", ["worker/events.py", "web/events.ts"]],
+      ["ORPC ping", ["server/orpc.ts"]],
+      ["GET /posts", ["server/hono.ts", "web/hono-client.ts"]],
+    ] as const) {
+      resetSessions();
+      const result = await focus(FIXTURE, query, 1800);
+      expect(Number(result.details.seeds)).toBeGreaterThan(0);
+      for (const file of expected) expect(result.text).toContain(file);
+      if (query === "CHANNEL users.changed") {
+        expect(result.text).toContain("message-channel-call:publish");
+        expect(result.text).toContain("message-channel-call:subscribe");
+      }
+    }
   });
 
   it("repeats the active nucleus while suppressing previously seen periphery", async () => {
@@ -194,6 +230,10 @@ describe.skipIf(!hasAstGrep())("fovea ops on the minimonorepo", () => {
     const reasons = r.details.warmedReasons as Record<string, string[]>;
     expect(reasons["web/api.ts"]).toContain("shared literal");
     expect(reasons["worker/search.rs"]).not.toContain("graph path");
+    const evidence = r.details.warmedEvidence as Record<string, Array<{ strategy: string; rule: string; source: string }>>;
+    expect(evidence["web/api.ts"]?.some((item) =>
+      item.strategy === "normalized-literal" && item.rule === "literal-path" && item.source.startsWith("/api/users"),
+    )).toBe(true);
     // the seed file's own symbols are not part of the review list
     expect(r.text.split("\n").filter((l) => l.startsWith("server/users.go"))).toHaveLength(0);
   });

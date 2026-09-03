@@ -5,7 +5,7 @@
 // on prefix length — aider's render-and-count loop generalized to a field.
 
 import { writeFileSync } from "node:fs";
-import type { Edge, EdgeKind, Graph, NodeRec } from "./types.js";
+import type { Edge, EdgeEvidence, EdgeKind, Graph, NodeRec } from "./types.js";
 
 export const tokenEstimate = (text: string): number => Math.ceil(text.length / 4);
 
@@ -26,6 +26,7 @@ interface DirectRelation {
   priority: number;
   weight: number;
   seed: number;
+  evidence?: EdgeEvidence;
 }
 
 const RELATION_PRIORITY: Record<EdgeKind, number> = {
@@ -44,10 +45,17 @@ const relationLabel = (edge: Edge, seedAtA: boolean, candidate: NodeRec): string
     case "imports": return seedAtA ? "→ import" : "← importer";
     case "tests": return seedAtA ? "→ subject" : "← test";
     case "inherits": return seedAtA ? "→ parent" : "← subclass";
-    case "anchors": return seedAtA ? candidate.kind === "file" ? "→ feature file" : "→ handler" : "← route";
+    case "anchors": return seedAtA ? candidate.kind === "file" ? "→ feature file" : "→ handler" : "← feature";
     case "join": return "↔ shared literal";
     case "contains": return seedAtA ? "◇ member" : "◇ file";
   }
+};
+
+const evidenceLabel = (evidence: EdgeEvidence | undefined): string => {
+  if (!evidence) return "";
+  const source = evidence.source?.replace(/\s+/g, " ").slice(0, 48);
+  const derivation = evidence.rule ? `${evidence.strategy}/${evidence.rule}` : evidence.strategy;
+  return ` · ${derivation}${source ? `:${source}` : ""}`;
 };
 
 const directRelations = (g: Graph, seeds: ReadonlySet<number>): Map<number, DirectRelation> => {
@@ -63,6 +71,7 @@ const directRelations = (g: Graph, seeds: ReadonlySet<number>): Map<number, Dire
       priority: RELATION_PRIORITY[edge.kind],
       weight: edge.w,
       seed: aSeed ? edge.a : edge.b,
+      evidence: edge.evidence,
     };
     const current = out.get(node);
     if (!current || relation.priority > current.priority ||
@@ -85,6 +94,7 @@ export interface RevealedNode {
   role: "focus" | "direct" | "hot" | "warm";
   relation?: string;
   seedId?: string;
+  evidence?: EdgeEvidence;
 }
 
 export interface FitResult {
@@ -176,7 +186,8 @@ export const revealFoveated = (
         ? `${relation.label} of ${g.nodes[relation.seed]!.name}`
         : relation.label
       : undefined;
-    const context = seedSet.has(i) ? "  [focus]" : displayRelation ? `  [${displayRelation}]` : "";
+    const provenance = relation?.kind === "contains" ? "" : evidenceLabel(relation?.evidence);
+    const context = seedSet.has(i) ? "  [focus]" : displayRelation ? `  [${displayRelation}${provenance}]` : "";
     const remember = (role: RevealedNode["role"]): void => {
       ids.push(node.id);
       revealed.push({
@@ -191,6 +202,7 @@ export const revealFoveated = (
         role,
         relation: displayRelation,
         seedId: relation ? g.nodes[relation.seed]!.id : undefined,
+        evidence: relation?.evidence,
       });
     };
     const glowLine = `  · ${node.name} (${node.kind}) ${formatNodeLocation(node)}`;
@@ -206,7 +218,7 @@ export const revealFoveated = (
     } else if (h >= WARM_TIER || semanticRelation) {
       const warmCount = warmPerFile.get(node.file) ?? 0;
       const warmLine = semanticRelation
-        ? `  ${displayRelation}  ${node.name} (${node.kind}) ${formatNodeLocation(node)}`
+        ? `  ${displayRelation}${provenance}  ${node.name} (${node.kind}) ${formatNodeLocation(node)}`
         : glowLine;
       allItems.push(warmLine);
       if (!semanticRelation && node.kind !== "file" && warmCount >= MAX_UNRELATED_WARM_PER_FILE) {

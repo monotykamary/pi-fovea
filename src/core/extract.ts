@@ -335,7 +335,7 @@ const importsFromMatches = (matches: readonly AgMatch[]): ImportSite[] => {
       continue;
     }
     // Go import block: pull quoted specs out of the captured block text.
-    for (const blockText of [m.text, ...(m.multi.S ?? [])]) {
+    for (const blockText of [m.text, ...(m.multi.S ?? []).map((item) => item.text)]) {
       for (const sm of blockText.matchAll(/"([^"\n]+)"/g)) {
         out.push({ file: m.file, spec: sm[1]!, line: m.line });
       }

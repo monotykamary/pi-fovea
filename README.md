@@ -55,17 +55,21 @@ and test commands in your loop. CI has the final say.
 
 | Command | Ask | Answer |
 |---|---|---|
-| `fovea_sketch` | where is everything? | production-first silhouette; test and fixture architecture stays collapsed |
-| `fovea_focus` | what is this? | exact matches, typed relationships, suggested reads, optional source scopes, and deterministic `fresh` views |
-| `fovea_dwell` | what else? | widens the current focus and returns newly relevant neighbors |
-| `fovea_impact` | what does this touch? | hunk-precise symbol seeding, review order across languages, unmet co-change companions, and a persistent obligation checklist |
+| `fovea_sketch` | where is everything? | production-first silhouette plus explicit discovery/extraction coverage; test and fixture architecture stays collapsed |
+| `fovea_focus` | what is this? | exact symbols/routes/protocol ids, evidenced relationships, path-gap reasons, suggested reads, scopes, and deterministic `fresh` views |
+| `fovea_dwell` | what else? | widens the current focus, or expires safely when its graph generation changed |
+| `fovea_impact` | what does this touch? | hunk-precise seeds, evidenced review paths, unmet co-change companions, and a persistent obligation checklist |
 | `grep` *(default hybrid)* | graph or text? | bare identifiers, qualified symbols, repo paths, and routes use Fovea; search options and obvious regex retain native grep |
 
 Focus normalizes camelCase and common inflections. An approximate name such as
 `switchServer` can still resolve `switchingServers`. A query with no certain
 match returns the nearest symbols plus their locations. Direct graph edges
-carry labels such as caller, callee, route, shared literal, and co-change.
-Symbols that merely share a file stay collapsed.
+carry labels such as caller, callee, route, shared literal, and co-change, plus
+deterministic `strategy` / `rule` / `source` evidence. Every tool result includes
+a coverage ledger; an explicit missing path says whether it is unsupported,
+ignored, oversized, generated, unreadable, Git-listed but unavailable, beyond
+the file cap, behind a closed nested-repository boundary, or absent. Symbols
+that merely share a file stay collapsed.
 
 The **Hybrid grep** toggle is on by default. `grep({ pattern: "CreateUser" })`,
 `grep({ pattern: "Controller.create" })`, and route paths travel through the
@@ -351,12 +355,73 @@ A rule may declare `prefixPattern`. A class-level prefix such as
 the rules file invalidates the anchor extraction cache. The parsed facts above
 the cache carry over.
 
-**Blind spots** are logged in `src/core/anchors.ts`. The current list covers
+### Non-HTTP protocol topology
+
+Fovea parses protocol grammar locally and deterministically; it does not run a
+language server, descriptor compiler, broker, or model. GraphQL documents emit
+named operations, root fields, schema types/type references, and fragments.
+Protocol Buffer documents emit package-qualified services, methods, messages,
+and request/response/field references. Exact generated gRPC method paths join
+back to their method and service. Declared tRPC and oRPC procedures join
+router members, split-file route constants, and client calls. Hono routes
+register through verb methods and `app.on`, and `hc()` RPC client calls join
+the server-declared hub. Literal publish/subscribe calls join on their channel
+while preserving the producer/consumer rule in edge evidence.
+
+Router object members anchor at every position: the first matching slot is
+captured exactly and the remaining members are enumerated from the sibling
+capture, each at its own line. tRPC receivers must root at the `t` builder or
+a `*Procedure` factory, oRPC at the `os` builder, so `trpc.post.list.query()`
+client proxies and oRPC `oc.*` contract-only shapes stay unlinked rather
+than guessing a nested name.
+
+Validated against 36 open-source repositories (hono, trpc, unnoq/orpc,
+documenso, cal.com, unkey, googleapis, protobuf, saleor, the published GitHub
+schema, mqtt.js, nats, ably, and more): Hono yields 1.2k route anchors plus
+72 RPC-client joins, documenso 214 tRPC procedures, the proto corpus 9.7k
+anchors with zero keyword false-positives, and a 1.2 MB GitHub schema parses
+through the raised protocol byte cap.
+
+Canonical ids can be focused directly:
+
+
+```text
+RPC users.v1.Users/GetUser
+RPC SERVICE users.v1.Users
+RPC MESSAGE users.v1.User
+GRAPHQL QUERY user
+GRAPHQL TYPE User
+TRPC loadUser
+ORPC ping
+CHANNEL users.changed
+```
+
+**Blind spots** are logged in `src/core/anchors.ts`. The remaining list covers
 Rust proc-macro attributes (actix `#[get("/x")]`), constructor-assigned
 prefixes (Flask Blueprint, FastAPI `APIRouter(prefix=…)`, chi `Mount`, Express
-`Router` mounts), `scope` and `namespace` nesting in Phoenix, Rails, or Django
-`include()`, and tRPC, GraphQL, and gRPC, whose call sites carry no path token
-to anchor on.
+`Router` mounts, Hono `basePath`/`route` sub-apps), `scope` and `namespace`
+nesting in Phoenix, Rails, or Django `include()`, router members behind
+spreads or beyond the first twelve positions, `trpc.post.list.query()` client
+proxies, oRPC dynamic clients, Hono `app.on` with non-standard verbs or path
+arrays and `hc()` chains deeper than one segment, GraphQL embedded inside
+host-language strings, generated gRPC clients with no literal method path,
+and other computed protocol names. Ambiguous strings remain unlinked rather
+than guessed.
+
+### Coverage and completeness
+
+File discovery records its source (`git` or bounded filesystem walk), recording
+state (`complete`, `partial`, or `truncated`), supported/unsupported/excluded
+counts, exact Git-listing cap omissions, closed nested repositories, unavailable
+Git worktree entries, and unreadable traversal boundaries. Extraction separately
+records partial failures, unreadable files, oversized files, and generated files.
+Protocol documents (`.proto`, `.graphql`, `.gql`) use their own larger byte cap
+(`FOVEA_MAX_PROTO_FILE_BYTES`, 8 MB default) because their exact readers never
+reach ast-grep; a real-world schema larger than the code cap still parses.
+Lists in tool details are bounded examples; the counters are not. A truncated
+filesystem walk reports an unknown omission count instead of inventing one.
+`/fovea status` and `fovea status` use this same ledger rather than comparing
+unlike tracked and supported file counts.
 
 ## How it works
 
@@ -383,7 +448,11 @@ e^{-tL} = e^{-t} \left[ I_0(t) T_0(M) + 2 \sum_{k\ge 1} (-1)^k I_k(t) T_k(M) \ri
 $$
 
 The vectors $T_k(M) s$ stay cached in the session. A new timescale reuses those
-vectors and pays only for fresh coefficients. The graph walk happens once.
+vectors and pays only for fresh coefficients. They are bound to a hash of the
+ordered graph generation (node identities/signatures and weighted, evidenced
+edges). A refresh that changes that generation clears focus/disclosure state;
+`dwell` fails closed and asks for a new focus rather than applying stale node
+indices. The graph walk happens once per generation.
 
 Discovery measures how often the argument at one slot of a call shape carries a
 route path. Shapes earn promotion past a Jeffreys-smoothed posterior:
@@ -409,6 +478,7 @@ regions.
 Full symbol and call extraction: **TypeScript, TSX, JavaScript, Python, Go, and Rust**.
 Outline-based symbols: **Elixir, Ruby, C, C++, Java, Kotlin, Lua, PHP, Swift, Scala, Haskell, and Bash**.
 Config joins through literals: **YAML, JSON, TOML, env, Markdown, and OpenAPI**.
+Exact contract topology: **Protocol Buffers (`.proto`) and GraphQL (`.graphql`, `.gql`)**, joined to gRPC, tRPC, oRPC, Hono, and producer/consumer call sites.
 
 ## Development
 

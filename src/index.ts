@@ -10,7 +10,7 @@ import { resolveAgentDir } from "./core/agent-dir.js";
 import { loadFoveaConfig, type FoveaConfig } from "./core/config.js";
 import { hasAstGrep } from "./core/astgrep.js";
 import { ROOT_CACHE_LIMIT } from "./core/asyncutil.js";
-import { dwell, ensureStateBackground, focus, impact, sketch } from "./core/ops.js";
+import { coverageSummary, dwell, ensureStateBackground, focus, impact, sketch } from "./core/ops.js";
 import { observeSessionPaths, resetSessions } from "./core/session.js";
 import { captureMutation, finishMutation, type MutationCapture } from "./core/provenance.js";
 import { resetSyncBaselines, sync, warmSync } from "./core/sync.js";
@@ -396,7 +396,7 @@ export default function fovea(pi: ExtensionAPI) {
     name: "fovea_sketch",
     label: "Fovea Sketch",
     description:
-      "Survey a repository as a production-first silhouette: shipped feature anchors and directory regions first, with tests and fixtures collapsed. Cheap start of the progressive-disclosure loop.",
+      "Survey a repository as a production-first silhouette: shipped feature anchors and directory regions first, with tests and fixtures collapsed. Details include deterministic discovery/extraction coverage and omissions.",
     promptSnippet: "Survey an unfamiliar repository with production architecture first",
     promptGuidelines: [
       "Use fovea_sketch once at the start of work in an unfamiliar repository, then focus a surfaced symbol or path.",
@@ -420,14 +420,14 @@ export default function fovea(pi: ExtensionAPI) {
     name: "fovea_focus",
     label: "Fovea Focus",
     description:
-      "Center the graph on a symbol, close spelling, route, env key, or file. Returns exact signatures, typed direct relationships, scoped filters, suggested reads, and nearby symbols on a miss.",
+      "Center the graph on a symbol, close spelling, route, protocol feature id, env key, or file. Returns exact signatures, typed direct relationships with strategy/rule/source evidence, coverage gaps, scopes, and suggested reads.",
     promptSnippet: "Locate a symbol or route and explain its direct graph relationships",
     promptGuidelines: [
       "Use fovea_focus for graph navigation and dependency context; use fresh=true when a reproducible full view is required.",
       "An overflow footer names a tmp file with the full list — read or grep it for the remainder; use fovea_dwell to widen the neighborhood semantically.",
     ],
     parameters: Type.Object({
-      query: Type.String({ description: "Symbol name or close spelling, route path, env key, or repo-relative file path." }),
+      query: Type.String({ description: "Symbol, route, env key, repo path, or canonical feature id such as RPC pkg.Service/Method, GRAPHQL QUERY field, TRPC procedure, or CHANNEL key." }),
       path: Type.Optional(Type.String({ description: "Optional repo-relative file or directory scope." })),
       language: Type.Optional(Type.String({ description: "Optional ast-grep language scope, such as TypeScript or Go." })),
       kind: Type.Optional(Type.Union(
@@ -465,7 +465,7 @@ export default function fovea(pi: ExtensionAPI) {
     name: "fovea_dwell",
     label: "Fovea Dwell",
     description:
-      "Widen the current focus and return newly relevant neighbors that were previously collapsed. Use only when fovea_focus says more context remains.",
+      "Widen the current focus and return newly relevant neighbors that were previously collapsed. If the graph generation changed, expires safely and asks for a fresh focus instead of applying stale vectors.",
     promptSnippet: "Widen the current Fovea focus for additional neighbors",
     promptGuidelines: ["Use fovea_dwell only after fovea_focus when wider subsystem context is useful."],
     parameters: Type.Object({
@@ -490,7 +490,7 @@ export default function fovea(pi: ExtensionAPI) {
     name: "fovea_impact",
     label: "Fovea Impact",
     description:
-      "Predict review order from changed files, symbols, or a PR base. Returns warmed files with causal channels such as calls, imports, shared literals, routes, tests, and co-change history.",
+      "Predict review order from changed files, symbols, or a PR base. Returns warmed files with causal channels, deterministic edge evidence paths, explicit input coverage gaps, co-change history, and obligations.",
     promptSnippet: "Predict the likely review surface of a change",
     promptGuidelines: ["Use fovea_impact before broad or risky edits and when checking the blast radius of completed changes."],
     parameters: Type.Object({
@@ -555,18 +555,12 @@ export default function fovea(pi: ExtensionAPI) {
         return;
       }
       try {
-        const [state, tracked, astGrep] = await Promise.all([
+        const [state, astGrep] = await Promise.all([
           sketch(ctx.cwd, 256),
-          pi.exec("git", ["-C", ctx.cwd, "ls-files"], { timeout: 15_000 })
-            .catch(() => ({ code: -1, stdout: "" })),
           pi.exec(process.env.FOVEA_AST_GREP ?? "ast-grep", ["--version"], { timeout: 15_000 })
             .catch(() => ({ code: -1, stdout: "" })),
         ]);
-        const indexed = Number(state.details.files ?? 0);
-        const trackedCount = tracked.code === 0
-          ? tracked.stdout.split("\n").filter(Boolean).length
-          : undefined;
-        const coverage = trackedCount === undefined ? `${indexed} indexed files` : `${indexed}/${trackedCount} tracked files indexed`;
+        const coverage = coverageSummary(state.details);
         const failedCount = Number(state.details.extractionFailures ?? 0);
         const unreadableCount = Array.isArray(state.details.extractionUnreadable) ? state.details.extractionUnreadable.length : 0;
         const oversizedCount = Array.isArray(state.details.extractionOversized) ? state.details.extractionOversized.length : 0;

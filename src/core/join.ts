@@ -6,13 +6,13 @@
 // has no ranking signal" failure mode of uniform-weight graphs.
 
 import { ENV_TOKEN_RE, PATH_TOKEN_RE } from "./extract.js";
-import type { LiteralSite } from "./types.js";
+import type { EdgeEvidence, LiteralSite } from "./types.js";
 
 export type LitClass = "path" | "env" | "word";
 
 interface LitOccurrence { node: number; line: number; file: string; }
 
-interface JoinEdge { a: number; b: number; w: number; }
+interface JoinEdge { a: number; b: number; w: number; evidence: EdgeEvidence; }
 
 const PLACEHOLDER_SEGMENT = /^(?::[^/]+|\{[^}/]*\}|\$\{[^}/]*\}|\$[A-Za-z_]\w*|<[^/>]+>|\*+)$/; // $x = Kotlin template shorthand
 const WORD_RE = /^[A-Za-z][\w$.\-]{6,63}$/;
@@ -83,7 +83,7 @@ export const buildJoinIndex = (
   const byKey: JoinIndex["byKey"] = new Map();
   const edges: JoinEdge[] = [];
   const idfMax = Math.log(Math.max(total, 2));
-  const pairBest = new Map<string, number>();
+  const pairBest = new Map<string, { w: number; evidence: EdgeEvidence }>();
   for (const [key, g] of grouped) {
     const df = g.occ.length;
     const spec = Math.min(1, Math.log(total / Math.max(df, 1)) / idfMax || 0);
@@ -98,13 +98,23 @@ export const buildJoinIndex = (
         const b = g.occ[j]!.node;
         if (a === b) continue;
         const pk = a < b ? `${a}|${b}` : `${b}|${a}`;
-        pairBest.set(pk, Math.max(pairBest.get(pk) ?? 0, w));
+        const evidence: EdgeEvidence = {
+          strategy: "normalized-literal",
+          rule: `literal-${g.cls}`,
+          source: key,
+          candidates: df,
+          key,
+        };
+        const previous = pairBest.get(pk);
+        if (!previous || w > previous.w || (w === previous.w && key.localeCompare(previous.evidence.key ?? "") < 0)) {
+          pairBest.set(pk, { w, evidence });
+        }
       }
     }
   }
-  for (const [pk, w] of pairBest) {
+  for (const [pk, best] of pairBest) {
     const [a, b] = pk.split("|").map(Number) as [number, number];
-    edges.push({ a, b, w });
+    edges.push({ a, b, w: best.w, evidence: best.evidence });
   }
   return { byKey, edges };
 };

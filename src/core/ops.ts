@@ -9,14 +9,14 @@ import { join, posix } from "node:path";
 import { diffHunks, prFiles, uncommittedFiles } from "./git.js";
 import { chebyshevVectors, chooseOrder, forwardHeat, heatField } from "./heat.js";
 import { formatNodeLocation, revealFoveated, revealGroups, tokenEstimate, type GroupLine, type RevealedNode } from "./render.js";
-import { FOCUS_T0, getSession, observeSessionPaths, TK_ORDER } from "./session.js";
+import { clearSessionFocus, FOCUS_T0, getSession, observeSessionPaths, TK_ORDER } from "./session.js";
 import { detectBasins } from "./basins.js";
 import { classifyLiteral, normalizeLiteral } from "./join.js";
 import { isTestFile } from "./extract.js";
 import { effectiveWeight, expectationResiduals, type CoChangeHistory } from "./cochange.js";
 import { epochStats, mergeWarmed, openEpoch, residual } from "./obligations.js";
-import type { Graph, NodeKind, NodeRec } from "./types.js";
-import { ensureState } from "./state.js";
+import type { EdgeEvidence, Graph, NodeKind, NodeRec } from "./types.js";
+import { ensureState, explainPathCoverage } from "./state.js";
 import type { RepoState } from "./state.js";
 export { ensureState, ensureStateBackground, evictState, getInflight, getState } from "./state.js";
 export type { RepoState } from "./state.js";
@@ -27,11 +27,25 @@ export interface OpResult {
   details: Record<string, unknown>;
 }
 
-// Honest coverage: surface dropped extractions instead of letting a thin
-// graph read as a small repo. Suffixes go into rendered headers; the file
-// lists go into structured details for consumers that can act on them.
+// Honest coverage: a thin graph must never read as a small repository.
+// Headers carry actionable failures; structured details retain the full ledger.
 const extractionSuffix = (state: RepoState): string => {
   const parts: string[] = [];
+  if (state.discovery.capped) {
+    const omitted = state.discovery.omittedSupported;
+    parts.push(omitted === null
+      ? `!file cap ${state.discovery.maxFiles} reached`
+      : `!file cap omitted ${omitted}`);
+  }
+  if (state.discovery.unreadableDirectoriesSeen) {
+    parts.push(`!${state.discovery.unreadableDirectoriesSeen} directories unreadable`);
+  }
+  if (state.discovery.closedBoundariesSeen) {
+    parts.push(`!${state.discovery.closedBoundariesSeen} nested boundaries closed`);
+  }
+  if (state.discovery.unavailableFilesSeen) {
+    parts.push(`!${state.discovery.unavailableFilesSeen} listed files unavailable`);
+  }
   if (state.extraction.failed.length) parts.push(`!${state.extraction.failed.length} files failed extraction`);
   if (state.extraction.unreadable.length) parts.push(`!${state.extraction.unreadable.length} files unreadable`);
   if (state.extraction.oversized.length) parts.push(`!${state.extraction.oversized.length} files over size cap`);
@@ -40,12 +54,46 @@ const extractionSuffix = (state: RepoState): string => {
 };
 
 const extractionDetails = (state: RepoState): Record<string, unknown> => ({
+  version: state.version,
+  generation: state.generation,
+  coverage: {
+    ...state.discovery,
+    extractedFiles: Object.keys(state.facts).length,
+    partialFiles: state.extraction.failed.slice(0, 20),
+    unreadableFiles: state.extraction.unreadable,
+    oversizedFiles: state.extraction.oversized,
+    generatedFiles: state.extraction.generated,
+  },
+  // Legacy flat fields remain additive compatibility for tool consumers.
   extractionFailures: state.extraction.failed.length,
   extractionFailedFiles: state.extraction.failed.slice(0, 20),
   extractionUnreadable: state.extraction.unreadable,
   extractionOversized: state.extraction.oversized,
   extractionGenerated: state.extraction.generated,
 });
+
+/** Compact status text from the authoritative discovery ledger. */
+export const coverageSummary = (details: Record<string, unknown>): string => {
+  const report = details.coverage as Partial<RepoState["discovery"]> | undefined;
+  const indexed = Number(report?.indexedFiles ?? details.files ?? 0);
+  if (!report) return `${indexed} indexed files`;
+  const supported = Number(report.supportedFilesSeen ?? indexed);
+  const parts = [`${indexed}/${supported} supported files selected (${report.source ?? "unknown"}/${report.recording ?? "unknown"})`];
+  if (report.unsupportedFilesSeen) parts.push(`${report.unsupportedFilesSeen} unsupported`);
+  if (report.excludedEntriesSeen) parts.push(`${report.excludedEntriesSeen} excluded`);
+  if (report.capped) parts.push(report.omittedSupported === null
+    ? `!more omitted at cap ${report.maxFiles}`
+    : `!${report.omittedSupported ?? 0} omitted at cap ${report.maxFiles}`);
+  if (report.closedBoundariesSeen) parts.push(`!${report.closedBoundariesSeen} boundaries closed`);
+  if (report.unreadableDirectoriesSeen) parts.push(`!${report.unreadableDirectoriesSeen} directories unreadable`);
+  if (report.unavailableFilesSeen) parts.push(`!${report.unavailableFilesSeen} listed files unavailable`);
+  return parts.join(", ");
+};
+
+const looksLikeRepoPath = (query: string): boolean => {
+  const value = query.trim();
+  return !value.startsWith("/") && (value.startsWith("@") || value.startsWith("./") || value.includes("/") || /\.[A-Za-z0-9]+$/.test(value));
+};
 
 // Seed resolution.
 
@@ -156,6 +204,20 @@ export const resolveSeeds = (state: RepoState, query: string, options: FocusOpti
   };
   const q = query.trim();
   const terms = q.split(/\s+/).filter((t) => t.length > 1);
+
+  // Full feature ids are exact seeds for routes and non-HTTP protocols alike.
+  // Once named exactly, do not dilute the nucleus with fuzzy symbol matches.
+  const featureId = q.toLowerCase();
+  const exactFeatures = g.nodes
+    .map((node, index) => node.kind === "anchor" && node.name.toLowerCase() === featureId && allows(index) ? index : -1)
+    .filter((index) => index >= 0);
+  if (exactFeatures.length) {
+    return {
+      seeds: exactFeatures,
+      note: `${exactFeatures.length} exact feature ${exactFeatures.length === 1 ? "hub" : "hubs"}: ${q}`,
+      suggestions: [],
+    };
+  }
 
   // Literal route: treat the query itself as a join token (path/env/word).
   const cls = classifyLiteral(q);
@@ -324,8 +386,12 @@ export const sketch = async (root: string, budget?: number): Promise<OpResult> =
   const conductance = state.csr.deg;
   const closureFor = (i: number): number[] => [i, ...(state.adjacency.get(i) ?? []).map((edge) => edge.to)];
   const anchorIdx = g.nodes.map((node, i) => (node.kind === "anchor" ? i : -1)).filter((i) => i >= 0);
-  const productionAnchorIdx = anchorIdx.filter((i) => closureFor(i).some((j) => !isTestScope(g.nodes[j]!.file)));
-  const testAnchorIdx = anchorIdx.filter((i) => !productionAnchorIdx.includes(i));
+  const topologyKinds = new Set(["graphql-type", "graphql-fragment", "graphql-operation", "rpc-message"]);
+  const anchorKinds = new Map(g.anchors.map((anchor) => [anchor.id, anchor.kind]));
+  const mapAnchorIdx = anchorIdx.filter((i) => !topologyKinds.has(anchorKinds.get(g.nodes[i]!.name) ?? ""));
+  const productionAnchorIdx = mapAnchorIdx.filter((i) => closureFor(i).some((j) => !isTestScope(g.nodes[j]!.file)));
+  const productionAnchorSet = new Set(productionAnchorIdx);
+  const testAnchorIdx = mapAnchorIdx.filter((i) => !productionAnchorSet.has(i));
   const productionHubIdx = g.nodes
     .map((_, i) => i)
     .filter((i) => !isTestScope(g.nodes[i]!.file))
@@ -341,7 +407,8 @@ export const sketch = async (root: string, budget?: number): Promise<OpResult> =
   let vmax = 0;
   for (let i = 0; i < field.length; i++) if (field[i]! > vmax) vmax = field[i]!;
   if (vmax <= 0) {
-    return { text: "fovea sketch: empty graph (no supported files matched)", tokens: 0, details: { files: 0 } };
+    const text = `fovea sketch: empty graph (no supported files matched)${extractionSuffix(state)}`;
+    return { text, tokens: tokenEstimate(text), details: { files: 0, ...extractionDetails(state) } };
   }
 
   // Feature groups: anchors first; where the repo declares few routes,
@@ -468,6 +535,9 @@ export const focus = async (
   const g = state.graph;
   const session = getSession(root);
   const B = clampBudget(budget, 512);
+  const requestedCoverage = looksLikeRepoPath(query)
+    ? await explainPathCoverage(state, [query])
+    : [];
   const { seeds, note, suggestions } = resolveSeeds(state, query, options);
   if (!seeds.length) {
     const renderMiss = (count: number): string => {
@@ -478,7 +548,11 @@ export const focus = async (
       const guidance = suggestions.length
         ? "Retry fovea_focus with one of these names, a route path (/api/...), or a file path."
         : "Try a symbol name, a route path (/api/...), or a file path. Run fovea_sketch for the map silhouette first.";
+      const coverageGaps = requestedCoverage
+        .filter((entry) => entry.status !== "indexed")
+        .map((entry) => `! ${entry.path ?? entry.requested}: ${entry.reason}.`);
       return [
+        ...coverageGaps,
         ...(state.extraction.failed.length
           ? [`! ${state.extraction.failed.length} files failed extraction; matches may be incomplete.`]
           : []),
@@ -503,18 +577,19 @@ export const focus = async (
           score: Number(score.toFixed(3)),
         })),
         scope: { path: options.path, language: options.language, kind: options.kind },
+        requestedCoverage,
         ...extractionDetails(state),
       },
     };
   }
   const scopeKey = [options.path ?? "", options.language?.toLowerCase() ?? "", options.kind ?? ""].join("|");
-  const key = `${state.version}:${[...seeds].sort((a, b) => a - b).join(",")}:${scopeKey}`;
-  if (options.fresh || session.focusKey !== key) {
-    session.t = FOCUS_T0;
-    session.disclosed.clear();
+  const key = `${state.generation}:${[...seeds].sort((a, b) => a - b).join(",")}:${scopeKey}`;
+  if (options.fresh || session.generation !== state.generation || session.focusKey !== key) {
+    clearSessionFocus(session);
     session.focusKey = key;
     session.scope = { path: options.path, language: options.language, kind: options.kind };
   }
+  session.generation = state.generation;
   if (session.tkKey !== key) {
     session.tk = chebyshevVectors(state.csr, seedVector(g.nodes.length, seeds), TK_ORDER);
     session.tkKey = key;
@@ -547,6 +622,7 @@ export const focus = async (
       suppressed: fit.suppressed,
       t,
       scope: { path: options.path, language: options.language, kind: options.kind },
+      requestedCoverage,
       nodes: fit.revealed,
       suggestedReads: suggestedReads(fit.revealed),
       ...extractionDetails(state),
@@ -559,12 +635,19 @@ export const dwell = async (root: string, factor?: number, budget?: number): Pro
   const g = state.graph;
   const session = getSession(root);
   const B = clampBudget(budget, 512);
-  if (!session.seeds.length) {
+  if (session.seeds.length && (session.generation !== state.generation || session.tk[0]?.length !== g.nodes.length)) {
+    const previousGeneration = session.generation || "unknown";
+    clearSessionFocus(session);
+    const text = `fovea dwell: focus expired because the graph changed (${previousGeneration} → ${state.generation}). Call fovea_focus again; no stale vector was applied.`;
     return {
-      text: "fovea dwell: no focus yet. Call fovea_focus with a symbol or route first; dwell then deepens that field.",
-      tokens: 0,
-      details: { seeds: 0 },
+      text,
+      tokens: tokenEstimate(text),
+      details: { seeds: 0, staleFocus: true, previousGeneration, ...extractionDetails(state) },
     };
+  }
+  if (!session.seeds.length) {
+    const text = "fovea dwell: no focus yet. Call fovea_focus with a symbol, feature id, route, or file first; dwell then deepens that field.";
+    return { text, tokens: tokenEstimate(text), details: { seeds: 0, ...extractionDetails(state) } };
   }
   const from = session.t;
   const to = Math.min(64, from * Math.max(1.2, factor ?? 2));
@@ -581,7 +664,7 @@ export const dwell = async (root: string, factor?: number, budget?: number): Pro
     ? new Set(g.nodes.filter((node) => matchesFocusScope(node, scope)).map((node) => node.id))
     : undefined;
   const fit = revealFoveated(g, field, {
-    header: `fovea dwell · context widened ${Number((to / from).toFixed(1))}× · new results`,
+    header: `fovea dwell · context widened ${Number((to / from).toFixed(1))}× · new results${extractionSuffix(state)}`,
     include: scopedIds,
     disclosed: session.disclosed,
     seeds: session.seeds,
@@ -624,7 +707,10 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   const state = ensured ?? (await ensureState(root));
   const g = state.graph;
   const B = clampBudget(args.budget, 512);
-  const files = new Set<string>(args.files ?? []);
+  const requestedCoverage = args.files?.length
+    ? await explainPathCoverage(state, args.files)
+    : [];
+  const files = new Set<string>((args.files ?? []).map((file) => file.startsWith("@") ? file.slice(1) : file));
   if (args.base) for (const f of await prFiles(root, args.base)) files.add(f);
   if (args.includeUncommitted !== false && !args.base) for (const f of await uncommittedFiles(root)) files.add(f);
 
@@ -722,10 +808,15 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
     }
   }
   if (!seedSet.size) {
+    const gaps = requestedCoverage
+      .filter((entry) => entry.status !== "indexed")
+      .map((entry) => `\n! ${entry.path ?? entry.requested}: ${entry.reason}.`)
+      .join("");
+    const text = `fovea impact: no seed files (repo clean or paths unknown). Pass files: [...] or symbols: [...] for a what-if cascade.${gaps}`;
     return {
-      text: "fovea impact: no seed files (repo clean or paths unknown). Pass files: [...] or symbols: [...] for a what-if cascade.",
-      tokens: 0,
-      details: { seeds: 0 },
+      text,
+      tokens: tokenEstimate(text),
+      details: { seeds: 0, requestedCoverage, ...extractionDetails(state) },
     };
   }
   const seeds = [...seedSet];
@@ -790,6 +881,16 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
     top.push([v, i]);
   });
   const reasonByFile = new Map<string, Set<string>>();
+  type ImpactEvidence = EdgeEvidence & { kind: Graph["edges"][number]["kind"] };
+  const evidenceByFile = new Map<string, ImpactEvidence[]>();
+  const noteEvidence = (file: string, kind: Graph["edges"][number]["kind"], evidence: EdgeEvidence | undefined): void => {
+    if (!evidence) return;
+    const list = evidenceByFile.get(file) ?? [];
+    const item: ImpactEvidence = { kind, ...evidence };
+    const key = JSON.stringify(item);
+    if (list.length < 3 && !list.some((existing) => JSON.stringify(existing) === key)) list.push(item);
+    evidenceByFile.set(file, list);
+  };
   // Per-NODE first-encounter reasons: the verdict memory is charged and aged
   // per graph node, so the channel prior must be attached at the same
   // granularity a node warms at, not smeared over its file.
@@ -825,6 +926,7 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       : undefined;
     if (farNode !== undefined) noteNode(farNode, [reason]);
     if (!target || !fileAgg.has(target)) continue;
+    noteEvidence(target, edge.kind, edge.evidence);
     const reasons = reasonByFile.get(target) ?? new Set<string>();
     reasons.add(reason);
     reasonByFile.set(target, reasons);
@@ -834,7 +936,7 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   // shortest paths once from all seeds, preserving semantic edge kinds while
   // omitting same-file containment hops from the user-facing reason.
   const visited = new Set(seeds);
-  const queue = seeds.map((node) => ({ node, reasons: [] as string[] }));
+  const queue = seeds.map((node) => ({ node, reasons: [] as string[], evidence: [] as ImpactEvidence[] }));
   for (let head = 0; head < queue.length; head++) {
     const current = queue[head]!;
     for (const edge of state.adjacency.get(current.node) ?? []) {
@@ -844,11 +946,15 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       const reasons = reason && !current.reasons.includes(reason)
         ? [...current.reasons, reason]
         : current.reasons;
+      const evidence = edge.evidence && current.evidence.length < 3
+        ? [...current.evidence, { kind: edge.kind as Graph["edges"][number]["kind"], ...edge.evidence }]
+        : current.evidence;
       noteNode(edge.to, reasons);
-      queue.push({ node: edge.to, reasons });
+      queue.push({ node: edge.to, reasons, evidence });
       const file = g.nodes[edge.to]!.file;
       if (fileAgg.has(file) && !seedFiles.has(file) && !reasonByFile.has(file) && reasons.length) {
         reasonByFile.set(file, new Set(reasons.slice(0, 3)));
+        for (const item of evidence) noteEvidence(file, item.kind, item);
       }
     }
   }
@@ -921,7 +1027,7 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   const groups: GroupLine[] = [...anchorHits, ...fileGroups];
   const seedNames = seeds.slice(0, 5).map((i) => g.nodes[i]!.file).join(", ");
   const fit = revealGroups(groups, {
-    header: `fovea impact · changed: ${seedNames}${seeds.length > 5 ? ", …" : ""} · likely review order`,
+    header: `fovea impact · changed: ${seedNames}${seeds.length > 5 ? ", …" : ""} · likely review order${extractionSuffix(state)}`,
     budget: B,
     overflowTo: overflowArtifact("impact", `${root}|${(args.files ?? []).join(",")}`),
   });
@@ -933,6 +1039,7 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       historyPartners,
       warmed: groups.length,
       truncated: fit.truncated,
+      requestedCoverage,
       ...extractionDetails(state),
       // Structured form for consumers (turn-sync): warmed anchors, files,
       // and the strongest direct evidence channel without text re-parsing.
@@ -951,6 +1058,7 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
         file,
         [...(reasonByFile.get(file) ?? new Set(["graph path"]))],
       ])),
+      warmedEvidence: Object.fromEntries(fileEntries.map(([file]) => [file, evidenceByFile.get(file) ?? []])),
       warmedNodes,
       // Deterministic omitted-edit alarm, strongest first, capped.
       expectedButUnchanged: [...companionResiduals.entries()]

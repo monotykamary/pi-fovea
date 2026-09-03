@@ -15,7 +15,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { dirname, join as joinPath } from "node:path";
@@ -48,6 +48,7 @@ import {
 } from "./anchors.js";
 import { aggregateFiles, harvestFile, promote, type FileSigs } from "./discover.js";
 import { makeFileSource } from "./source.js";
+import { extractProtocolAnchors } from "./protocols.js";
 import type { CallSite, Graph, ImportSite, LiteralSite, SymbolRec } from "./types.js";
 import type { AnchorDraft } from "./anchors.js";
 import type { JoinIndex } from "./join.js";
@@ -65,10 +66,10 @@ export interface FileFacts {
   sigs?: FileSigs;
 }
 
-const CACHE_VERSION = 11; // bump when extractor semantics or the cache schema change (v11: generated-source skip for minified bundles)
+const CACHE_VERSION = 14; // v14: orpc/hono call shapes, proto keyword guard, graphql union/implements, protocol doc size cap
 
 // Honest coverage: what the extractor could NOT see. Tools and status render
-// this so a thin graph never reads as a small repo (files dropped silently).
+// this so a thin graph never reads as a small repo; omissions are explicit.
 export interface ExtractionReport {
   /** Files implicated in at least one failed ast-grep invocation (chunk-granular). */
   failed: string[];
@@ -81,11 +82,48 @@ export interface ExtractionReport {
    * matches and takes ~a minute per invocation. */
   generated: string[];
 }
+
+export interface DiscoveryReport {
+  source: "git" | "walk";
+  /** Complete for the visible worktree, partial on unavailable entries/directories, truncated at the file cap. */
+  recording: "complete" | "partial" | "truncated";
+  maxFiles: number;
+  candidateFilesSeen: number;
+  supportedFilesSeen: number;
+  indexedFiles: number;
+  unsupportedFilesSeen: number;
+  excludedEntriesSeen: number;
+  closedBoundariesSeen: number;
+  unreadableDirectoriesSeen: number;
+  unavailableFilesSeen: number;
+  capped: boolean;
+  /** Exact for Git listings, zero for complete walks, unknown for truncated walks. */
+  omittedSupported: number | null;
+  unsupportedExamples: string[];
+  excludedExamples: string[];
+  closedBoundaries: string[];
+  unreadableDirectories: string[];
+  unavailableFiles: string[];
+  excludedPolicies: string[];
+}
+
+export interface FileDiscovery {
+  files: string[];
+  report: DiscoveryReport;
+}
+
 const IGNORE_DIRS = new Set([".git", "node_modules", "dist", "vendor", ".venv", "venv", "target", "coverage", ".next", "build", "__pycache__", ".pi", ".pi-fovea", "deps", "_build", ".tox", "Pods", ".cargo"]);
 // File count is also a resident-graph budget, not just a discovery limit.
 // Override deliberately for giant monorepos; normal roots stay bounded.
 const MAX_FILES = envInt("FOVEA_MAX_FILES", 8000, 100, 100_000);
 const MAX_FILE_BYTES = envInt("FOVEA_MAX_FILE_BYTES", 1024 * 1024, 64 * 1024, 64 * 1024 * 1024);
+// Protocol documents never reach ast-grep; their exact readers are
+// regex-bounded, so real-world schemas larger than the code cap still parse
+// instead of being silently dropped as oversized.
+const PROTOCOL_MAX_FILE_BYTES = envInt("FOVEA_MAX_PROTO_FILE_BYTES", 8 * 1024 * 1024, 256 * 1024, 64 * 1024 * 1024);
+const PROTOCOL_DOC_RE = /\.(?:proto|graphql|gql)$/i;
+const maxFileBytes = (file: string): number =>
+  PROTOCOL_DOC_RE.test(file) ? PROTOCOL_MAX_FILE_BYTES : MAX_FILE_BYTES;
 // Recursion cap for nested submodules; real-world nesting is one or two deep.
 const MAX_SUBMODULE_DEPTH = envInt("FOVEA_MAX_SUBMODULE_DEPTH", 4, 1, 16);
 // Generated dependency manifests are enormous and carry no first-class routes.
@@ -94,12 +132,14 @@ const LOCKFILE_NAMES = new Set([
   "pipfile.lock", "poetry.lock", "cargo.lock", "composer.lock", "gemfile.lock", "go.sum",
 ]);
 
-const isJunk = (f: string): boolean => {
-  const segs = f.split("/");
-  for (const s of segs) if (IGNORE_DIRS.has(s)) return true;
-  const base = segs[segs.length - 1]!.toLowerCase();
-  return LOCKFILE_NAMES.has(base) || base.endsWith(".lock");
+export const discoveryExclusionReason = (file: string): string | undefined => {
+  const segments = file.split("/");
+  for (const segment of segments) if (IGNORE_DIRS.has(segment)) return `ignored directory ${segment}`;
+  const base = segments[segments.length - 1]!.toLowerCase();
+  return LOCKFILE_NAMES.has(base) || base.endsWith(".lock") ? "dependency lockfile" : undefined;
 };
+
+const isJunk = (file: string): boolean => discoveryExclusionReason(file) !== undefined;
 
 const supported = (f: string, routeRes?: RegExp[]): boolean => {
   const ext = f.split(".").pop()?.toLowerCase() ?? "";
@@ -137,81 +177,204 @@ const NO_BOUNDARIES: ReadonlySet<string> = new Set();
  * disclosure keeps boundaries closed until the root's FactStore enrolls them
  * (first hint or collapsed drift inside); enrolled boundaries recurse into
  * prefixed tracked + untracked paths, their own .gitignore still applying
- * via --exclude-standard. Unpopulated checkouts yield no listing and drop
- * out silently. The gitlink path itself never enters the result: it names a
+ * via --exclude-standard. Empty or unpopulated checkouts remain reported as
+ * closed boundaries. The gitlink path itself never enters the result: it names a
  * directory, not a file, and keeping it would poison the unreadable ledger
  * on refresh (this also covers dotted submodule names).
  */
+interface ExpandedListing {
+  files: string[];
+  closedBoundaries: string[];
+  unavailableFiles: string[];
+}
+
 const expandSubmodules = async (
   root: string,
   prefix: string,
   entries: string[],
   enrolled: ReadonlySet<string>,
   depth: number,
-): Promise<string[]> => {
-  const candidates = entries.filter((e) => !e.endsWith("/"));
-  const isDir = await mapLimit(
+): Promise<ExpandedListing> => {
+  const candidates = entries.filter((entry) => !entry.endsWith("/"));
+  const kinds = await mapLimit(
     candidates,
     IO_CONCURRENCY,
-    (e) => stat(joinPath(root, e)).then((s) => s.isDirectory(), () => false),
+    (entry) => lstat(joinPath(root, entry)).then(
+      (value) => value.isDirectory() ? "directory" : value.isFile() || value.isSymbolicLink() ? "file" : "other",
+      () => "unavailable",
+    ),
   );
-  const gitlinks = new Set(candidates.filter((_, i) => isDir[i]));
-  const files = entries.filter((e) => !gitlinks.has(e)).map((e) => prefix + e);
-  if (depth <= 0 || !gitlinks.size) return files;
+  const gitlinks = new Set(candidates.filter((_, index) => kinds[index] === "directory"));
+  const files = candidates.filter((_, index) => kinds[index] === "file").map((entry) => prefix + entry);
+  const unavailableFiles = candidates
+    .filter((_, index) => kinds[index] === "unavailable" || kinds[index] === "other")
+    .map((entry) => prefix + entry);
+  const closedBoundaries: string[] = [];
   for (const link of gitlinks) {
     const key = prefix + link;
-    if (!enrolled.has(key)) continue;
-    const inner = await gitOut(joinPath(root, link), ["ls-files", "-co", "--exclude-standard"], { timeout: 30_000 });
-    if (!inner?.trim()) continue;
-    files.push(...await expandSubmodules(
+    if (depth <= 0 || !enrolled.has(key)) {
+      closedBoundaries.push(key);
+      continue;
+    }
+    const inner = await gitOut(joinPath(root, link), ["ls-files", "-z", "-co", "--exclude-standard"], { timeout: 30_000 });
+    if (inner === undefined) {
+      closedBoundaries.push(key);
+      continue;
+    }
+    if (!inner.trim()) {
+      closedBoundaries.push(key);
+      continue;
+    }
+    const nested = await expandSubmodules(
       joinPath(root, link),
       `${key}/`,
-      inner.split("\n").map((s) => s.trim()).filter(Boolean),
+      inner.split("\0").filter(Boolean),
       enrolled,
       depth - 1,
-    ));
+    );
+    files.push(...nested.files);
+    closedBoundaries.push(...nested.closedBoundaries);
+    unavailableFiles.push(...nested.unavailableFiles);
   }
-  return files;
+  return { files, closedBoundaries, unavailableFiles };
 };
 
-export const listFiles = async (root: string, routeRes?: RegExp[], enrolled: ReadonlySet<string> = NO_BOUNDARIES): Promise<string[]> => {
-  const out = await gitOut(root, ["ls-files", "-co", "--exclude-standard"], { timeout: 30_000 });
-  let files: string[] = [];
-  if (out?.trim()) {
-    const entries = out.split("\n").map((s) => s.trim()).filter(Boolean);
-    files = await expandSubmodules(root, "", entries, enrolled, MAX_SUBMODULE_DEPTH);
-  } else {
-    // A plain workspace holds nested repositories closed: .git markers
-    // (directories or worktree gitfiles) bound the walk until the FactStore
-    // enrolls that exact boundary, which the first edit inside does through
-    // refresh hints. Stop during traversal (not after) so memory and latency
-    // stay proportional to MAX_FILES.
-    const walk = async (dir: string, prefix: string): Promise<void> => {
-      if (files.length >= MAX_FILES) return;
-      let entries;
-      try {
-        entries = await readdir(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      if (prefix && !enrolled.has(prefix) && entries.some((entry) => entry.name === ".git")) return;
-      entries.sort((a, b) => a.name.localeCompare(b.name));
-      for (const e of entries) {
-        if (files.length >= MAX_FILES) break;
-        const rel = prefix ? `${prefix}/${e.name}` : e.name;
-        if (e.isDirectory()) {
-          if (!IGNORE_DIRS.has(e.name)) await walk(joinPath(dir, e.name), rel);
-        } else if (e.isFile() && supported(rel, routeRes)) {
-          files.push(rel);
-        }
-      }
+const excludedPolicies = (): string[] => [
+  "Git ignore rules for untracked files",
+  "nested repositories until enrolled",
+  `directories: ${[...IGNORE_DIRS].sort().join(", ")}`,
+  "dependency lockfiles",
+];
+
+const examples = (values: Iterable<string>): string[] =>
+  [...new Set(values)].sort().slice(0, 20);
+
+export const discoverFiles = async (
+  root: string,
+  routeRes?: RegExp[],
+  enrolled: ReadonlySet<string> = NO_BOUNDARIES,
+  maxFiles = MAX_FILES,
+): Promise<FileDiscovery> => {
+  const limit = Math.max(1, Math.floor(maxFiles));
+  const gitListing = await gitOut(root, ["ls-files", "-z", "-co", "--exclude-standard"], { timeout: 30_000 });
+  if (gitListing !== undefined) {
+    const entries = gitListing.split("\0").filter(Boolean);
+    const expanded = await expandSubmodules(root, "", entries, enrolled, MAX_SUBMODULE_DEPTH);
+    const candidates = [...new Set(expanded.files)].sort();
+    const unavailable = [...new Set(expanded.unavailableFiles)].sort();
+    const eligible: string[] = [];
+    const unsupported: string[] = [];
+    const excluded: string[] = [...expanded.closedBoundaries, ...unavailable];
+    for (const file of candidates) {
+      if (isJunk(file)) excluded.push(file);
+      else if (supported(file, routeRes)) eligible.push(file);
+      else unsupported.push(file);
+    }
+    const files = eligible.slice(0, limit);
+    return {
+      files,
+      report: {
+        source: "git",
+        recording: unavailable.length ? "partial" : "complete",
+        maxFiles: limit,
+        candidateFilesSeen: candidates.length + unavailable.length,
+        supportedFilesSeen: eligible.length,
+        indexedFiles: files.length,
+        unsupportedFilesSeen: unsupported.length,
+        excludedEntriesSeen: excluded.length,
+        closedBoundariesSeen: expanded.closedBoundaries.length,
+        unreadableDirectoriesSeen: 0,
+        unavailableFilesSeen: unavailable.length,
+        capped: eligible.length > limit,
+        omittedSupported: Math.max(0, eligible.length - files.length),
+        unsupportedExamples: examples(unsupported),
+        excludedExamples: examples(excluded),
+        closedBoundaries: examples(expanded.closedBoundaries),
+        unreadableDirectories: [],
+        unavailableFiles: examples(unavailable),
+        excludedPolicies: excludedPolicies(),
+      },
     };
-    await walk(root, "");
   }
-  files = files.filter((f) => supported(f, routeRes) && !isJunk(f));
+
+  const files: string[] = [];
+  const unsupported: string[] = [];
+  const excluded: string[] = [];
+  const closedBoundaries: string[] = [];
+  const unreadableDirectories: string[] = [];
+  let candidateFilesSeen = 0;
+  let supportedFilesSeen = 0;
+  let truncated = false;
+
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    if (truncated) return;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      unreadableDirectories.push(prefix || ".");
+      return;
+    }
+    if (prefix && !enrolled.has(prefix) && entries.some((entry) => entry.name === ".git")) {
+      closedBoundaries.push(prefix);
+      excluded.push(prefix);
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (truncated) break;
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (IGNORE_DIRS.has(entry.name)) excluded.push(`${rel}/`);
+        else await walk(joinPath(dir, entry.name), rel);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      candidateFilesSeen++;
+      if (isJunk(rel)) {
+        excluded.push(rel);
+      } else if (!supported(rel, routeRes)) {
+        unsupported.push(rel);
+      } else {
+        supportedFilesSeen++;
+        if (files.length < limit) files.push(rel);
+        else truncated = true;
+      }
+    }
+  };
+  await walk(root, "");
   files.sort();
-  return files.slice(0, MAX_FILES);
+  return {
+    files,
+    report: {
+      source: "walk",
+      recording: truncated ? "truncated" : unreadableDirectories.length ? "partial" : "complete",
+      maxFiles: limit,
+      candidateFilesSeen,
+      supportedFilesSeen,
+      indexedFiles: files.length,
+      unsupportedFilesSeen: unsupported.length,
+      excludedEntriesSeen: excluded.length,
+      closedBoundariesSeen: closedBoundaries.length,
+      unreadableDirectoriesSeen: unreadableDirectories.length,
+      unavailableFilesSeen: 0,
+      capped: truncated,
+      omittedSupported: truncated ? null : 0,
+      unsupportedExamples: examples(unsupported),
+      excludedExamples: examples(excluded),
+      closedBoundaries: examples(closedBoundaries),
+      unreadableDirectories: examples(unreadableDirectories),
+      unavailableFiles: [],
+      excludedPolicies: excludedPolicies(),
+    },
+  };
 };
+
+export const listFiles = async (
+  root: string,
+  routeRes?: RegExp[],
+  enrolled: ReadonlySet<string> = NO_BOUNDARIES,
+): Promise<string[]> => (await discoverFiles(root, routeRes, enrolled)).files;
 
 interface FileMeta { size: number; mtime: number }
 
@@ -520,10 +683,11 @@ const extractInto = async (
     const code = batch.filter((f) => !isConfigFile(f));
     const anchorPlan = anchorScanPlan(code, packRules.pack);
     const rules = [...coreScanRules(code), ...anchorPlan.rules];
-    const [symbols, scanned, fileRouteAnchors] = await Promise.all([
+    const [symbols, scanned, fileRouteAnchors, protocolAnchors] = await Promise.all([
       extractSymbols(code, root, source),
       scanRules(rules, code, root),
       extractFileRoutes(code, root, packRules.fileRoutes, source),
+      extractProtocolAnchors(batch, source),
     ]);
     const symsByFile = new Map<string, SymbolRec[]>();
     for (const rel of code) symsByFile.set(rel, []);
@@ -556,7 +720,7 @@ const extractInto = async (
       ]);
     }
 
-    return { batch, symbols, imports, calls, literals, anchors, fileRouteAnchors };
+    return { batch, symbols, imports, calls, literals, anchors, fileRouteAnchors, protocolAnchors };
   });
 
   for (const result of extracted) {
@@ -581,6 +745,7 @@ const extractInto = async (
     putByFile(result.literals, (f) => f.literals);
     putByFile(result.anchors, (f) => f.anchors);
     putByFile(result.fileRouteAnchors, (f) => f.anchors);
+    putByFile(result.protocolAnchors, (f) => f.anchors);
     await yieldToLoop();
   }
 };
@@ -728,7 +893,7 @@ export const loadFacts = async (root: string, files: string[]): Promise<FactsOut
       unreadable.push(rel);
       continue;
     }
-    if (meta.size > MAX_FILE_BYTES) {
+    if (meta.size > maxFileBytes(rel)) {
       oversized.push(rel);
       if (store.facts.delete(rel)) cacheDirty = true;
       store.meta.set(rel, meta);
@@ -892,7 +1057,7 @@ export const refreshFacts = async (
     const cachedMeta = store.meta.get(rel);
     if (store.failedSha.has(rel) && metaEquals(meta, cachedMeta)) continue;
     store.meta.set(rel, meta);
-    if (meta.size > MAX_FILE_BYTES) {
+    if (meta.size > maxFileBytes(rel)) {
       oversized.push(rel);
       store.facts.delete(rel);
       store.tainted.delete(rel);
