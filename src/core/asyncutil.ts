@@ -10,7 +10,11 @@ export const envInt = (name: string, dflt: number, min: number, max: number): nu
   return Math.max(min, Math.min(max, Math.floor(raw)));
 };
 
-/** Max concurrent child processes (ast-grep, git) across the whole extension. */
+/**
+ * Max concurrent child processes (ast-grep, git) across the whole extension.
+ * ast-grep already parallelizes parsing inside each process (auto --threads
+ * ≈ cores), so values above ~4 mostly add contention instead of throughput.
+ */
 export const SPAWN_CONCURRENCY = envInt("FOVEA_SPAWN_CONCURRENCY", 3, 1, 32);
 /** Max concurrent file reads/stats. */
 export const IO_CONCURRENCY = envInt("FOVEA_IO_CONCURRENCY", 32, 4, 512);
