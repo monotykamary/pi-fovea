@@ -1,0 +1,3 @@
+# Pi 0.85 imports pi-server from the coding-agent CLI without declaring it.
+[install]
+linker = "hoisted"
