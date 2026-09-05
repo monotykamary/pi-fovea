@@ -1,8 +1,19 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "entry": ["src/index.ts", "scripts/**/*.ts", "tests/**/*.test.ts"],
-  "project": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
-  "ignore": ["tests/fixtures/**"],
-  "ignoreBinaries": ["ast-grep"],
-  "ignoreDependencies": ["@earendil-works/pi-server"]
+  "entry": [
+    "src/index.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.test.ts"
+  ],
+  "project": [
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.ts"
+  ],
+  "ignore": [
+    "tests/fixtures/**"
+  ],
+  "ignoreBinaries": [
+    "ast-grep"
+  ]
 }
