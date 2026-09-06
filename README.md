@@ -259,6 +259,17 @@ partners, and decays with wall-clock time. Edits that resist symbol-level
 location fall back to the old file-node seed. New files, deletions, renames,
 untracked paths, and oversized diffs all take that path.
 
+Historical co-change is a decaying **heat prior**, never a permanent graph edge.
+It counts up to 400 first-parent integration boundaries: merge net changes count
+once, not again through their constituent commits. Explicit `fixup!`/`squash!`
+followups join only uniquely resolved older subjects in that window. Time,
+author, shared issue numbers, and unlabeled "forgot this" do not group work.
+Boundaries are not proof of a semantic feature (release merges can mix work).
+Aggregates above 24 tracked files emit no pairs but retain directional touch
+counts; two distinct retained units are needed for a pair, three for expectations.
+Raw history caching includes shallow-state identity; recency still applies at use.
+Focus, sketch, and the structural diffusion operator remain unchanged.
+
 The obligation ledger keeps the list. Every cascade merges its per-file
 residual mass into a session epoch. Entries stay until evidence moves them. A
 read marks `inspected`. An edit marks `changed` and raises the generation. A

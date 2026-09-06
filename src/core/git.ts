@@ -92,7 +92,7 @@ export const gitPrefix = async (root: string): Promise<string | undefined> => {
   return prefix;
 };
 
-export const gitRelativePath = (path: string, prefix: string): string | undefined => {
+const gitRelativePath = (path: string, prefix: string): string | undefined => {
   const normalized = path.replace(/\\/g, "/");
   if (!prefix) return normalized;
   return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : undefined;

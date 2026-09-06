@@ -3,11 +3,11 @@
 // Heat diffusion over the static graph says what is near what BY
 // CONSTRUCTION (imports, calls, routes, literals). Joint git history says
 // what ACTUALLY moves together — the signal `impact` needs when two files
-// share no static edge but are always edited in the same commits.
+// share no static edge but repeatedly move in the same integration units.
 //
 // Under the all-in heat model that signal is a seeded field, not permanent
 // structure. Each (a, b) pair records directional touch counts plus the
-// committer timestamp of the most recent joint commit; at wall-clock `now`
+// latest member timestamp of the most recent joint unit; at wall-clock `now`
 // its heat contribution is
 //
 //     w = w0(count, jaccard) * 2^(-ageDays / COCHANGE_HALF_LIFE_DAYS)
@@ -25,15 +25,15 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join as joinPath } from "node:path";
+import { dirname, resolve, join as joinPath } from "node:path";
 import { envInt } from "./asyncutil.js";
-import { gitHead, gitOut, gitPrefix, gitRelativePath } from "./git.js";
+import { gitHead, gitOut, gitPrefix } from "./git.js";
 
 const LOG_COMMITS = 400;
-const MAX_FILES_PER_COMMIT = 24; // squashed monsters carry no pair signal
+const MAX_FILES_PER_UNIT = 24; // oversized integration units carry no pair signal
 const MIN_SHARED = 2;            // a single collision is noise
-const MAX_PAIRS_PER_FILE = 16;   // cap each file's history fan-out
-const COCHANGE_CACHE_VERSION = 3;
+const MAX_PAIRS_PER_FILE = 16;   // union of endpoint top-16 selections, not a hard degree cap
+const COCHANGE_CACHE_VERSION = 4;
 const EXPECTATION_MIN_SUPPORT = 3;
 const WILSON_Z_95 = 1.96;
 const DAY_MS = 86_400_000;
@@ -47,15 +47,15 @@ export interface CoChangePartner {
   partner: string;
   /** Base conductance from count + Jaccard, BEFORE recency decay. */
   w: number;
-  /** Committer epoch ms of the most recent joint commit of this pair. */
+  /** Latest member committer epoch ms of this pair's most recent joint unit. */
   lastTs: number;
-  /** Joint commits for this directional pair in the bounded history window. */
+  /** Joint integration units for this directional pair in the bounded window. */
   n_ij?: number;
-  /** Commits in the window that touch the source file. */
+  /** Integration units in the window that touch the source file. */
   n_i?: number;
-  /** Commits in the window that touch the partner file. */
+  /** Integration units in the window that touch the partner file. */
   n_j?: number;
-  /** Total commits observed in the bounded history window. */
+  /** Total integration units observed in the bounded history window. */
   N?: number;
 }
 
@@ -172,7 +172,7 @@ const cachePath = (root: string): string =>
   joinPath(tmpdir(), `pi-fovea-cochange-${createHash("sha1").update(root).digest("hex").slice(0, 16)}.json`);
 
 // coChangeHistory returns, for every tracked file, its past co-change partners
-// with base conductance and the most recent joint commit time. filesInGraph
+// with base conductance and the most recent joint unit time. filesInGraph
 // restricts to files we actually track, so vendored churn is excluded.
 export const coChangeHistory = async (
   root: string,
@@ -183,10 +183,21 @@ export const coChangeHistory = async (
   if (!head) return new Map(); // not a git repo
   const prefix = await gitPrefix(root);
   if (prefix === undefined) return new Map();
+  // Deepening can change evidence without changing HEAD. Do not mistake a
+  // shallow boundary's synthetic root diff for an integrated feature.
+  const shallowPath = await gitOut(root, ["rev-parse", "--git-path", "shallow"]);
+  if (shallowPath === undefined) return new Map();
+  let shallowText = "";
+  try { shallowText = await readFile(resolve(root, shallowPath.trim()), "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return new Map();
+  }
+  const shallow = new Set(shallowText.trim().split(/\s+/));
   const tracked = new Set(filesInGraph);
   const key = createHash("sha1")
     .update(`v${COCHANGE_CACHE_VERSION}\0`)
-    .update([...tracked].sort().join("\n"))
+    .update(shallowText)
+    .update(JSON.stringify([...tracked].sort()))
     .digest("hex")
     .slice(0, 12);
   const cp = cachePath(root);
@@ -198,60 +209,95 @@ export const coChangeHistory = async (
     ) return groupPairs(cached.pairs, cached.commits);
   } catch { /* recompute */ }
 
-  const log = await gitOut(root, ["log", "--format=%x00%ct", "--numstat", "-n", String(LOG_COMMITS), "--no-renames", "--diff-filter=AMR", "--", "."]) ?? "";
-  // numstat lines: "<added>\t<deleted>\t<file>"; each commit begins with a NUL
-  // line carrying its committer timestamp (%ct).
+  // No pathspec: history simplification could remove integration boundaries
+  // or make subroot denominators differ from the repository's observations.
+  const log = await gitOut(root, [
+    "log", "--first-parent", "--diff-merges=first-parent", "--root",
+    "--format=%x00FOVEA%x00%H%x00%P%x00%ct%x00%s%x00", "--name-status", "-z",
+    "-n", String(LOG_COMMITS), "--no-renames", "--no-ext-diff", "--no-textconv",
+    "--no-relative", "--no-notes", "--no-show-signature", "--no-color", head, "--",
+  ], { maxBuffer: 16 * 1024 * 1024 });
+  if (log === undefined) return new Map(); // never cache a failed/partial scan
+  type Unit = { subject: string; merge: boolean; ts: number; files: Set<string> };
+  const units: Unit[] = [];
+  const fields = log.split("\0");
+  let cursor = 0;
+  while (cursor < fields.length) {
+    if (fields[cursor] === "") { cursor++; continue; }
+    if (fields[cursor++] !== "FOVEA") return new Map();
+    const hash = fields[cursor++];
+    const parents = fields[cursor++];
+    const seconds = Number(fields[cursor++]);
+    const subject = fields[cursor++];
+    if (!hash || parents === undefined || subject === undefined || !Number.isFinite(seconds)
+      || fields[cursor++] !== "") return new Map();
+    const files = new Set<string>();
+    let first = true;
+    while (cursor < fields.length && fields[cursor] !== "") {
+      let status = fields[cursor++]!;
+      if (first) {
+        if (!status.startsWith("\n")) return new Map();
+        status = status.slice(1);
+        first = false;
+      }
+      let file = fields[cursor++];
+      if (!/^[AMDTUXB]$/.test(status) || !file) return new Map();
+      // NUL names are literal, including tabs, newlines and backslashes.
+      // Filter here, not in Git: --diff-filter drops empty observations and
+      // lets the scan walk arbitrarily far looking for 400 matching diffs.
+      if ((status === "A" || status === "M") && file.startsWith(prefix)) {
+        file = file.slice(prefix.length);
+        if (tracked.has(file)) files.add(file);
+      }
+    }
+    if (!shallow.has(hash)) units.push({ subject, merge: parents.includes(" "), ts: seconds * 1000, files });
+  }
+
+  // Match against the entire bounded window before mutating anything. An
+  // exact unique older subject is evidence; proximity and issue IDs are not.
+  const subjects = new Map<string, number[]>();
+  units.forEach((unit, i) => {
+    const hits = subjects.get(unit.subject) ?? [];
+    hits.push(i);
+    subjects.set(unit.subject, hits);
+  });
+  const consumed = new Set<number>();
+  units.forEach((unit, i) => {
+    if (unit.merge) return;
+    const target = /^(?:fixup!|squash!) (.+)$/.exec(unit.subject)?.[1];
+    if (!target) return;
+    const hits = subjects.get(target);
+    if (hits?.length !== 1 || hits[0]! <= i) return;
+    const parent = units[hits[0]!]!;
+    for (const file of unit.files) parent.files.add(file);
+    parent.ts = Math.max(parent.ts, unit.ts);
+    consumed.add(i);
+  });
+
   const pairCount = new Map<string, number>();
   const pairLast = new Map<string, number>();
   const touchCount = new Map<string, number>();
-  let commits = 0;
-  let inCommit = false;
-  let cur: string[] = [];
-  let curTs = 0;
-  const flush = (): void => {
-    if (!inCommit) {
-      cur = [];
-      return;
-    }
-    inCommit = false;
-    const fs = [...new Set(cur)].filter((f) => tracked.has(f)).sort();
-    cur = [];
-    // Directional denominators include solo touches and oversized commits;
-    // only pair production observes the monster-commit fan-out bound.
+  let commits = 0; // cache field retained: now independent integration units
+  units.forEach((unit, index) => {
+    if (consumed.has(index)) return;
+    commits++;
+    const fs = [...unit.files].sort();
+    // Solo and oversized units still contribute truthful denominators.
     for (const f of fs) touchCount.set(f, (touchCount.get(f) ?? 0) + 1);
-    if (fs.length < 2 || fs.length > MAX_FILES_PER_COMMIT) return;
+    if (fs.length < 2 || fs.length > MAX_FILES_PER_UNIT) return;
     for (let i = 0; i < fs.length; i++) {
       for (let j = i + 1; j < fs.length; j++) {
-        const k = `${fs[i]}|${fs[j]}`;
+        const k = JSON.stringify([fs[i], fs[j]]);
         pairCount.set(k, (pairCount.get(k) ?? 0) + 1);
-        if (curTs) pairLast.set(k, Math.max(pairLast.get(k) ?? 0, curTs));
+        pairLast.set(k, Math.max(pairLast.get(k) ?? 0, unit.ts));
       }
     }
-  };
-  for (const line of log.split("\n")) {
-    if (!line.trim()) continue;
-    if (line.includes("\0")) {
-      flush();
-      inCommit = true;
-      commits++;
-      curTs = 0;
-      const ts = Number(line.slice(line.indexOf("\0") + 1).trim());
-      if (Number.isFinite(ts)) curTs = ts * 1000;
-      continue;
-    }
-    const tab = line.indexOf("\t");
-    if (tab < 0) continue;
-    const secondTab = line.indexOf("\t", tab + 1);
-    if (secondTab < 0) continue;
-    const file = gitRelativePath(line.slice(secondTab + 1).trim(), prefix);
-    if (file) cur.push(file);
-  }
-  flush();
+  });
 
   const scored: CachedPair[] = [];
   for (const [k, n] of pairCount) {
     if (n < MIN_SHARED) continue;
-    const [a, b] = k.split("|") as [string, string];
+    const [a, b] = JSON.parse(k) as [string, string];
     const nA = touchCount.get(a) ?? 0;
     const nB = touchCount.get(b) ?? 0;
     const w = scorePair(n, nA, nB);

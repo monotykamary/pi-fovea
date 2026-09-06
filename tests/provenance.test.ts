@@ -104,15 +104,22 @@ describe("sync provenance", () => {
 
   it("reports a transition chain owned by multiple sessions as mixed", async () => {
     const { root, file } = rootWithFile();
-    await mutate(root, file, "session-a", "two\n", "tool-a");
-    await mutate(root, file, "session-b", "three\n", "tool-b");
+    // This case needs chronological cross-session receipts, not a same-ms tie.
+    let clock = Date.now();
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock++);
+    try {
+      await mutate(root, file, "session-a", "two\n", "tool-a");
+      await mutate(root, file, "session-b", "three\n", "tool-b");
 
-    const result = await attributeChanges(root, "session-a", 0, [{
-      file: "file.ts",
-      beforeSha: hash("one\n"),
-      afterSha: hash(readFileSync(file, "utf8")),
-    }]);
-    expect(result).toEqual({ kind: "mixed", files: { "file.ts": "mixed" } });
+      const result = await attributeChanges(root, "session-a", 0, [{
+        file: "file.ts",
+        beforeSha: hash("one\n"),
+        afterSha: hash(readFileSync(file, "utf8")),
+      }]);
+      expect(result).toEqual({ kind: "mixed", files: { "file.ts": "mixed" } });
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("leaves uninstrumented writes unattributed", async () => {
