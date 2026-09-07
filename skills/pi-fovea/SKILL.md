@@ -23,6 +23,24 @@ All four accept `maxTokens` (256–16000). Budget is roughly 4 chars per token.
 - **Sketch is the safe opening bid.** If unsure, pay for a sketch; it almost never exceeds a few hundred tokens.
 - **Skip the map when the repo is tiny.** A few dozen files are cheaper to bulk-read than to sketch; Fovea's value grows with repos larger than context. Either way it points at windows to read — the project's own format/lint/typecheck/test commands and CI remain the final verification layer.
 
+## Multiple projects/worktrees
+
+Use an explicit graph-tool `root` before editing an alternate authorized project.
+Roots resolve relative to `ctx.cwd`; symlink aliases share identity, linked Git
+worktrees do not. The first call establishes its sync baseline before returning.
+Graph results expose `details.root` and `details.observedRoots`; omitted roots use
+the last binding. Bind every target to observe; after binding, hooks stop using
+an unselected umbrella cwd. Parallel calls should specify roots explicitly.
+
+Native paths remain cwd-relative: use absolute paths or `../project/file` for
+edits and grep. Augment grep follows its actual search path's enrolled owner,
+not the active graph binding. Focus or file-seeded impact establishes attention
+for headless shell edits; path events alone never enroll siblings. Alternate
+roots do not inherit cwd project-config trust. Shared sync context and observed
+roots are bounded (`FOVEA_MAX_ROOTS`, default 2; excess enrollment errors).
+Reset/reload/session replacement clears bindings, not reusable extraction facts.
+See README's “Explicit project/worktree continuity (Rakazo)” for the full contract.
+
 ## Turn sync
 
 Before an agent starts, pi-fovea establishes its baseline or injects relevant out-of-band semantic drift into that run. After each assistant turn it compares again. The default `sync.scope: "session"` indexes the whole root but steers only for top-level directories/root files this conversation entered through path-bearing tools or focus. Sibling-directory drift advances the index and baseline silently. Current, mixed, and unattributed changes in scope may trigger a continuation; changes owned solely by another Fovea session wait for the next user prompt and cannot restart an idle agent. Comment- and formatting-only edits stay silent. Set `sync.scope: "repository"` only when root-wide steering is intentional.

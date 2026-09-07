@@ -1,9 +1,9 @@
 // The extension entry as pi sees it: register the graph tools, optionally
 // replace grep, and execute through Pi's TypeBox tool contract.
 
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, execSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { tmpdir as systemTmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import extension from "../src/index.js";
@@ -13,7 +13,9 @@ import { hasAstGrep } from "../src/core/astgrep.js";
 import { cachePathFor } from "../src/core/build.js";
 import { ensureState, evictState, getInflight, getState } from "../src/core/ops.js";
 import { DEFAULT_FOVEA_CONFIG } from "../src/core/config.js";
-import { resetSyncBaselines, warmCacheHas } from "../src/core/sync.js";
+import { resetSyncBaselines, syncBaselineStore, warmCacheHas } from "../src/core/sync.js";
+
+const tmpdir = () => realpathSync(systemTmpdir());
 
 const FIXTURE = new URL("./fixtures/mini", import.meta.url).pathname;
 
@@ -254,13 +256,14 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
   it("uses Fovea only for bare grep symbol queries", async () => {
     resetSessions();
     const loaded = await enableGrep();
+    cpSync(FIXTURE, loaded.root, { recursive: true });
     try {
       const graph = await loaded.tools.get("grep")!.execute(
         "t-grep-graph",
         { pattern: "GetUserHandler" },
         new AbortController().signal,
         undefined,
-        fakeCtx(FIXTURE),
+        fakeCtx(loaded.root, true),
       );
       expect(graph.content[0]!.text).toContain("fovea grep");
       expect(graph.content[0]!.text).toContain("server/users.go");
@@ -271,7 +274,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
         { pattern: "GetUserHandler" },
         new AbortController().signal,
         undefined,
-        fakeCtx(FIXTURE),
+        fakeCtx(loaded.root, true),
       );
       expect(graphAgain.content[0]!.text).toBe(graph.content[0]!.text);
       const qualified = await loaded.tools.get("grep")!.execute(
@@ -279,7 +282,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
         { pattern: "AirportsController.search" },
         new AbortController().signal,
         undefined,
-        fakeCtx(FIXTURE),
+        fakeCtx(loaded.root, true),
       );
       expect(qualified.content[0]!.text).toContain("fovea grep");
       expect(qualified.content[0]!.text).toContain("web/airports.controller.ts");
@@ -289,7 +292,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
         { pattern: "/api/users/{id}" },
         new AbortController().signal,
         undefined,
-        fakeCtx(FIXTURE),
+        fakeCtx(loaded.root, true),
       );
       expect(route.content[0]!.text).toContain("fovea grep");
       expect(route.content[0]!.text).toContain("server/main.go");
@@ -299,7 +302,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
         { pattern: "Get.*Handler" },
         new AbortController().signal,
         undefined,
-        fakeCtx(FIXTURE),
+        fakeCtx(loaded.root, true),
       );
       expect(regex.content[0]!.text).toContain("func GetUserHandler");
       expect(regex.content[0]!.text).not.toContain("fovea grep");
@@ -309,7 +312,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
         { pattern: "GetUserHandler", path: "server", literal: true, context: 1 },
         new AbortController().signal,
         undefined,
-        fakeCtx(FIXTURE),
+        fakeCtx(loaded.root, true),
       );
       expect(native.content[0]!.text).toContain("func GetUserHandler");
       expect(native.content[0]!.text).not.toContain("fovea grep");
@@ -783,6 +786,127 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
       evictState(root);
       rmSync(root, { recursive: true, force: true });
       rmSync(cachePathFor(root), { force: true });
+    }
+  });
+});
+
+describe.skipIf(!hasAstGrep())("explicit multi-root continuity", () => {
+  it("binds relative roots and symlink aliases, with independent linked-worktree baselines", async () => {
+    const parent = mkdtempSync(path.join(tmpdir(), "pi-fovea-roots-"));
+    const a = path.join(parent, "a");
+    const b = path.join(parent, "b");
+    cpSync(FIXTURE, a, { recursive: true });
+    execSync("git init -qb main && git add -A && git -c user.name=t -c user.email=t@t commit -qm init", { cwd: a });
+    execFileSync("git", ["worktree", "add", "-qb", "other", b], { cwd: a });
+    symlinkSync(b, path.join(parent, "alias"), "dir");
+    resetSessions();
+    resetSyncBaselines();
+    const loaded = load();
+    const ctx = fakeCtx(a, true);
+    const signal = new AbortController().signal;
+    try {
+      const run = (root?: string) => loaded.tools.get("fovea_focus")!.execute("focus", {
+        root, query: "server/main.go", maxTokens: 512,
+      }, signal, undefined, ctx);
+      const [, alternate] = await Promise.all([run("."), run("../alias")]);
+      expect(alternate.details.root).toBe(b);
+      expect(alternate.details.observedRoots).toEqual([a, b]);
+      expect(syncBaselineStore().has(a)).toBe(true);
+      expect(syncBaselineStore().has(b)).toBe(true);
+      expect(getState(a)).not.toBe(getState(b));
+      expect(getState(b)!.root).toBe(b);
+      expect((await run()).details.root).toBe(b);
+      expect((await run("../b")).details.observedRoots).toEqual([a, b]);
+      expect(Math.ceil(alternate.content[0]!.text.length / 4)).toBeLessThanOrEqual(512);
+
+      const main = path.join(b, "server/main.go");
+      writeFileSync(main, readFileSync(main, "utf8").replace("/api/users", "/api/worktree"));
+      await loaded.emit("turn_end", {}, ctx);
+      expect(loaded.messages).toHaveLength(1);
+      expect(loaded.messages[0]!.message.details).toMatchObject({ root: b });
+      expect(String(loaded.messages[0]!.message.content)).toContain("worktree");
+      expect(readFileSync(path.join(a, "server/main.go"), "utf8")).not.toContain("worktree");
+      const retained = getState(b);
+      await loaded.commands.get("fovea")!.handler("reset", ctx);
+      expect(syncBaselineStore().has(b)).toBe(false);
+      expect(getState(b)).toBe(retained);
+      const reset = await run();
+      expect(reset.details.root).toBe(a);
+      expect(reset.details.observedRoots).toEqual([a]);
+    } finally {
+      await loaded.emit("session_shutdown", {}, ctx);
+      for (const root of [a, b]) evictState(root);
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("routes multi-root edits and grep without widening sibling trust or the context allowance", async () => {
+    const parent = mkdtempSync(path.join(tmpdir(), "pi-fovea-coordinator-"));
+    const a = path.join(parent, "a");
+    const b = path.join(parent, "b");
+    const outside = path.join(parent, "unobserved");
+    const agentDir = path.join(parent, "agent");
+    mkdirSync(agentDir);
+    writeFileSync(path.join(agentDir, "fovea.json"), JSON.stringify({ sync: { budget: 1024 } }));
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    for (const root of [a, b, outside]) {
+      cpSync(FIXTURE, root, { recursive: true });
+      mkdirSync(path.join(root, ".pi"));
+      writeFileSync(path.join(root, ".pi/fovea.json"), JSON.stringify({ sync: { mode: "disabled" }, tools: { grepMode: "off" } }));
+      execSync("git init -qb main && git add -A && git -c user.name=t -c user.email=t@t commit -qm init", { cwd: root });
+    }
+    resetSessions();
+    resetSyncBaselines();
+    const loaded = load();
+    const ctx = fakeCtx(parent, true);
+    const signal = new AbortController().signal;
+    try {
+      for (const root of ["a", "b"]) {
+        await loaded.tools.get("fovea_focus")!.execute(root, { root, query: "server/main.go", maxTokens: 512 }, signal, undefined, ctx);
+      }
+      // Parent trust must not disable the sibling's baseline via sibling config.
+      expect(syncBaselineStore().has(a)).toBe(true);
+      expect(syncBaselineStore().has(b)).toBe(true);
+      const grepEvent = { toolName: "grep", input: { pattern: "GetUserHandler", path: "b/server" },
+        content: [{ type: "text", text: "native result" }], details: {}, isError: false };
+      const [patch] = await loaded.emit("tool_result", grepEvent, ctx);
+      expect(patch).toMatchObject({ details: { root: b, foveaAppended: true } });
+      const [trustedPatch] = await loaded.emit("tool_result", { ...grepEvent, input: { ...grepEvent.input, path: "server" } }, fakeCtx(b, true));
+      expect(trustedPatch).toBeUndefined();
+      const [again] = await loaded.emit("tool_result", grepEvent, ctx);
+      expect(again).toMatchObject({ details: { root: b } });
+      // Native no-path grep still searches cwd, not the last bound graph root.
+      expect((await loaded.emit("tool_result", { ...grepEvent, input: { pattern: "GetUserHandler" } }, ctx))[0]).toBeUndefined();
+
+      await loaded.emit("turn_start", {}, ctx);
+      await loaded.emit("tool_execution_start", { toolName: "edit", toolCallId: "a-edit", args: { path: "a/server/main.go" } }, ctx);
+      const mainA = path.join(a, "server/main.go");
+      writeFileSync(mainA, readFileSync(mainA, "utf8").replace("/api/users", "/api/alpha"));
+      await loaded.emit("tool_execution_end", { toolName: "edit", toolCallId: "a-edit" }, ctx);
+      // Mutation without any tool event: baseline already exists from focus.
+      const mainB = path.join(b, "server/main.go");
+      writeFileSync(mainB, readFileSync(mainB, "utf8").replace("/api/users", "/api/beta"));
+      await loaded.emit("tool_execution_start", { toolName: "read", toolCallId: "outside", args: { path: "unobserved/server/main.go" } }, ctx);
+      await loaded.emit("turn_end", {}, ctx);
+      expect(loaded.messages).toHaveLength(2);
+      expect(loaded.messages.map((m) => (m.message.details as { root: string }).root)).toEqual([a, b]);
+      expect(String(loaded.messages[0]!.message.content)).toContain("Origin: current session.");
+      expect(String(loaded.messages[1]!.message.content)).toContain("beta");
+      expect(loaded.messages.reduce((n, m) => n + Math.ceil(String(m.message.content).length / 4), 0)).toBeLessThanOrEqual(1024);
+      expect(getState(outside)).toBeUndefined();
+      expect(syncBaselineStore().has(outside)).toBe(false);
+      await expect(loaded.tools.get("fovea_sketch")!.execute("overflow", { root: "unobserved" }, signal, undefined, ctx)).rejects.toThrow("observed-root limit");
+      expect(getState(outside)).toBeUndefined();
+      await loaded.emit("turn_end", {}, ctx);
+      expect(loaded.messages).toHaveLength(2);
+    } finally {
+      await loaded.emit("session_shutdown", {}, ctx);
+      vi.unstubAllEnvs();
+      for (const root of [a, b]) {
+        evictState(root);
+        rmSync(provenancePathFor(root, "test-session"), { force: true });
+      }
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 });

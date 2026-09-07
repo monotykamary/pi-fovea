@@ -177,7 +177,7 @@ limits accept environment overrides:
 | --- | :---: | --- |
 | `FOVEA_MAX_FILES` | `8000` | maximum indexed files in one graph |
 | `FOVEA_MAX_FILE_BYTES` | `1048576` | maximum bytes extracted from one source file |
-| `FOVEA_MAX_ROOTS` | `2` | resident graph, fact, session, sync, and root-metadata caches |
+| `FOVEA_MAX_ROOTS` | `2` | observed execution roots and resident graph, fact, session, sync, and root-metadata caches |
 | `FOVEA_SPAWN_CONCURRENCY` | `3` | concurrent ast-grep/git child processes (ast-grep parallelizes parsing inside each process; values above ~4 rarely help) |
 | `FOVEA_MEMORY_HALF_LIFE_HOURS` | `48` | wall-clock half-life of the per-node sync memory (charged cascade warmth) |
 | `FOVEA_IO_CONCURRENCY` | `32` | concurrent file stat/read operations |
@@ -186,6 +186,62 @@ limits accept environment overrides:
 Files over the size cap keep their place in the model's view of the repo.
 Failed extractions do the same. You find both in `/fovea status` and in tool
 details.
+
+## Explicit project/worktree continuity (Rakazo)
+
+The extension's existing four graph tools are the headless binding API; no new
+host event or trust flag is required:
+
+```ts
+await extensions.fovea_focus({ root: "../project-b", query: "src/handler.ts", maxTokens: 1024 });
+// Baseline is ready before this resolves (unless target sync is disabled).
+// Native tools still use the host cwd: use absolute paths or cwd-relative paths.
+await pi.edit({ path: "../project-b/src/handler.ts", old: "before", new: "after" });
+await extensions.fovea_dwell({ maxTokens: 512 }); // last bound root
+```
+
+- `root` resolves against **the tool context's cwd**, not process cwd or the last
+  binding. Real paths unify symlink aliases; linked Git worktrees remain distinct
+  even when they share HEAD and a common Git directory. Roots are exact directory
+  scopes, not automatically promoted to Git toplevels.
+- Cwd is the startup/fallback observation target. After a graph call binds a root,
+  hooks inspect only the bound set. Bind each project you want observed; an
+  alternate binding does not keep an otherwise-unselected umbrella cwd active.
+  Calls without `root` use the last binding. Parallel coordinators should always
+  supply `root`; enrollment is serialized in invocation order. Results include
+  canonical `details.root` and sorted `details.observedRoots`.
+- A first binding establishes that target's semantic baseline before edits can
+  follow. Subsequent focus calls do not consume pending drift. Before-prompt and
+  post-turn sync compare every bound target, including hintless shell/Fabric/editor
+  changes. Attention remains target-local: focus a file/symbol or use
+  `fovea_impact({ root, files: ["src/file.ts"], includeUncommitted: false })` before
+  a headless mutation to enter its scope. Ordinary path events never enroll a new
+  root; they route to the most specific enrolled physical owner.
+- Native read/edit/write/search paths **do not change cwd**. Augment-mode grep
+  attaches only the graph of the enrolled owner of its actual cwd-relative or
+  absolute search path. No-path native grep still searches cwd; it never appends
+  an unrelated alternate graph. In legacy replace mode, bare graph queries and
+  their miss fallback use the bound root; explicit native options retain cwd
+  semantics. Each target's grep mode is checked independently.
+- Binding is an explicit request to index a directory, **not a sandbox or a trust
+  grant**. Rakazo must authorize tool arguments itself. `.pi/fovea.json` is loaded
+  only when that exact canonical target equals `ctx.cwd` and the context is
+  trusted. Parent/sibling trust never authorizes it; alternate targets use global
+  defaults. To honor a target's project config, run it in its own trusted Pi
+  context. Config cache keys include trust and agent directory. Existing
+  target-local declarative `.fovea/rules.json` extraction rules are unchanged.
+- All roots share one per-hook `sync.budget` allowance from the session cwd's
+  effective config, divided evenly and capped again by each target's budget;
+  root labels count toward that allowance. Hidden targets remain hidden (a mixed
+  pre-prompt aggregate is hidden). Graph calls keep their individual `maxTokens`.
+  Enrollment is capped by `FOVEA_MAX_ROOTS` (default 2); excess roots fail before
+  indexing rather than silently losing a baseline. Set this before startup for
+  larger coordinated runs.
+- `/fovea status` reports the bound root and observed count. `/fovea reset`,
+  shutdown, new/resume/fork/reload clear bindings and conversation baselines;
+  reusable content facts remain cached. Rebind after session replacement.
+  The standalone CLI remains stateless; these continuity semantics belong to
+  the Pi extension lifecycle.
 
 ## Turn sync
 
