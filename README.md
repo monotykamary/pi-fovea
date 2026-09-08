@@ -552,8 +552,27 @@ Exact contract topology: **Protocol Buffers (`.proto`) and GraphQL (`.graphql`, 
 ```sh
 bun install
 bun run check        # typecheck + full vitest suite
-bun run bench        # rate–distortion bench against ../pi-fabric
+bun run bench        # rate–distortion and refresh bench against ../pi-fabric
+bun run bench tests/fixtures/mini  # self-contained smoke run
 ```
+
+The developer benchmark gates timings on semantic equivalence: cold versus
+cached builds, and forced refresh versus clean rebuild after unchanged,
+location-only, semantic, added-file, and deleted-file scenarios in disposable
+copies of the cross-language fixture. It checks facts, weighted edges and
+evidence, coverage, operator contents, and fixture navigation; extraction-order
+permutations and opaque rebuild hashes are not semantic differences. Runtime
+ordering and generation invalidation are unchanged.
+
+Reports include focus/dwell and refresh median/p95 samples, actual estimated
+output tokens, and process peak RSS (including the validation work). Cold and
+disk-warm target builds are single samples; three-sample refresh p95s are only
+smoke diagnostics. The outline gets no more tokens than Fovea actually used.
+`fidelity@16k` measures disclosed node IDs against a finite larger Fovea response,
+**not independently labeled relevance**. Timing results are informational, never
+a flaky CI gate; deterministic equivalence tests run in `bun run check`.
+The bench clears the target's disposable facts cache to measure cold loading,
+but edits only temporary fixture copies.
 
 pi loads the extension straight from `src/` through jiti, so nothing needs
 building. Per-repo JSONL caches live in `$TMPDIR`, guarded by per-file content

@@ -64,11 +64,15 @@ export const buildCsr = (g: Graph): Csr => {
   return { n, rowPtr, col, w, deg };
 };
 
-// y = -P~ x where P~ = D^{-1/2} W D^{-1/2}. Isolated nodes (deg 0) map to themselves under heat.
-const applyNegP = (csr: Csr, x: Float64Array): Float64Array => {
-  const { n, rowPtr, col, w, deg } = csr;
-  const invSqrt = new Float64Array(n);
-  for (let i = 0; i < n; i++) invSqrt[i] = deg[i]! > 0 ? 1 / Math.sqrt(deg[i]!) : 0;
+const inverseDegrees = ({ n, deg }: Csr): Float64Array => {
+  const out = new Float64Array(n);
+  for (let i = 0; i < n; i++) out[i] = deg[i]! > 0 ? 1 / Math.sqrt(deg[i]!) : 0;
+  return out;
+};
+
+// y = -P~ x where P~ = D^{-1/2} W D^{-1/2}.
+const applyNegP = (csr: Csr, x: Float64Array, invSqrt = inverseDegrees(csr)): Float64Array => {
+  const { n, rowPtr, col, w } = csr;
   const y = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     let acc = 0;
@@ -130,13 +134,16 @@ const heatCoeff = (k: number, t: number): number => {
 export const chebyshevVectors = (csr: Csr, s: Float64Array, K: number): Float64Array[] => {
   const tk: Float64Array[] = new Array(K + 1);
   tk[0] = Float64Array.from(s);
-  if (K >= 1) tk[1] = applyNegP(csr, tk[0]!);
+  // Invocation-local normalization preserves compatibility with mutable/synthetic CSR
+  // callers without adding a persistent cache or a new invalidation boundary.
+  if (K === 0) return tk;
+  const invSqrt = inverseDegrees(csr);
+  if (K >= 1) tk[1] = applyNegP(csr, tk[0]!, invSqrt);
   for (let k = 2; k <= K; k++) {
     const prev = tk[k - 1]!;
-    const mv = applyNegP(csr, prev);
-    const out = new Float64Array(csr.n);
+    const out = applyNegP(csr, prev, invSqrt);
     const p2 = tk[k - 2]!;
-    for (let i = 0; i < csr.n; i++) out[i] = 2 * mv[i]! - p2[i]!;
+    for (let i = 0; i < csr.n; i++) out[i] = 2 * out[i]! - p2[i]!;
     tk[k] = out;
   }
   return tk;

@@ -3,7 +3,7 @@
 // (heat-kernel positivity, Bessel values).
 
 import { describe, expect, it } from "vitest";
-import { besselI, buildCsr, heatAt, taylorReference } from "../src/core/heat.js";
+import { besselI, buildCsr, chebyshevVectors, heatField, heatAt, taylorReference, type Csr } from "../src/core/heat.js";
 import type { Graph, NodeRec } from "../src/core/types.js";
 
 const mulberry32 = (seed: number) => () => {
@@ -28,7 +28,61 @@ const randomGraph = (n: number, p: number, seed: number): Graph => {
   return { nodes, edges, byName: new Map(), byFile: new Map(), anchors: [], files: [] };
 };
 
+// Frozen pre-optimization recurrence: exact parity is separate from the
+// independent scaled-Taylor accuracy check below.
+const legacyVectors = (csr: Csr, s: Float64Array, K: number): Float64Array[] => {
+  const apply = (x: Float64Array) => {
+    const inv = new Float64Array(csr.n);
+    for (let i = 0; i < csr.n; i++) inv[i] = csr.deg[i]! > 0 ? 1 / Math.sqrt(csr.deg[i]!) : 0;
+    const y = new Float64Array(csr.n);
+    for (let i = 0; i < csr.n; i++) {
+      let acc = 0;
+      for (let p = csr.rowPtr[i]!; p < csr.rowPtr[i + 1]!; p++) acc += csr.w[p]! * inv[csr.col[p]!]! * x[csr.col[p]!]!;
+      y[i] = -inv[i]! * acc;
+    }
+    return y;
+  };
+  const tk = [Float64Array.from(s)];
+  if (K >= 1) tk[1] = apply(tk[0]!);
+  for (let k = 2; k <= K; k++) {
+    const mv = apply(tk[k - 1]!);
+    const out = new Float64Array(csr.n);
+    for (let i = 0; i < csr.n; i++) out[i] = 2 * mv[i]! - tk[k - 2]![i]!;
+    tk[k] = out;
+  }
+  return tk;
+};
+
 describe("heat diffusion", () => {
+  it("preserves every recurrence vector exactly, including empty and disconnected graphs", () => {
+    for (const [n, p] of [[0, 0], [1, 0], [15, 0], [60, 0.08], [25, 1]]) {
+      const csr = buildCsr(randomGraph(n!, p!, 42));
+      const seed = Float64Array.from({ length: csr.n }, (_, i) => i % 3 === 0 ? 0.5 : 0);
+      const before = seed.slice();
+      for (const K of [0, 1, 2, 90]) {
+        const got = chebyshevVectors(csr, seed, K);
+        expect(got).toEqual(legacyVectors(csr, seed, K));
+        expect(new Set(got.map((v) => v.buffer)).size).toBe(K + 1);
+        expect(got[0]!.buffer).not.toBe(seed.buffer);
+        const snapshot = got.map((v) => v.slice());
+        for (const t of [0, 1, 8, 64]) heatField(got, t, csr.n);
+        expect(got).toEqual(snapshot);
+      }
+      expect(seed).toEqual(before);
+    }
+  });
+
+  it("does not retain normalization across CSR mutations or roots", () => {
+    const csr = buildCsr(randomGraph(20, 0.2, 7));
+    const seed = Float64Array.from({ length: csr.n }, (_, i) => i === 0 ? 1 : 0);
+    const first = chebyshevVectors(csr, seed, 12);
+    const snapshot = first.map((v) => v.slice());
+    csr.deg[0]! *= 2;
+    expect(chebyshevVectors(csr, seed, 12)).toEqual(legacyVectors(csr, seed, 12));
+    const other = buildCsr(randomGraph(20, 0.2, 99));
+    expect(chebyshevVectors(other, seed, 12)).toEqual(legacyVectors(other, seed, 12));
+    expect(first).toEqual(snapshot);
+  });
   it("besselI matches known values", () => {
     expect(besselI(0, 3)).toBeCloseTo(4.880792585865, 6);
     expect(besselI(1, 3)).toBeCloseTo(3.953370217403, 6);
