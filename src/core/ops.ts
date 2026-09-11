@@ -14,7 +14,7 @@ import { detectBasins } from "./basins.js";
 import { classifyLiteral, normalizeLiteral } from "./join.js";
 import { isTestFile } from "./extract.js";
 import { effectiveWeight, expectationResiduals, type CoChangeHistory } from "./cochange.js";
-import { epochStats, mergeWarmed, openEpoch, residual } from "./obligations.js";
+import { ensureEpoch, epochStats, mergeWarmed, residual } from "./obligations.js";
 import type { EdgeEvidence, Graph, NodeKind, NodeRec } from "./types.js";
 import { ensureState, explainPathCoverage } from "./state.js";
 import type { RepoState } from "./state.js";
@@ -1005,9 +1005,11 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   // verify) or the epoch resets — the conservation half of the
   // salience/obligation split.
   const foveaSession = getSession(root);
-  if (!foveaSession.obligationEpoch) openEpoch(foveaSession, seedFiles);
+  const epochDecision = ensureEpoch(foveaSession, seedFiles);
   if (companionResiduals.size) mergeWarmed(foveaSession, companionResiduals, "unmet co-change companion");
   if (fileAgg.size) mergeWarmed(foveaSession, fileAgg, "diffusion residual");
+  const obligations = residual(foveaSession);
+  const epochTotals = epochStats(foveaSession);
 
   const fileEntries = [...fileAgg.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const fileGroups: GroupLine[] = [];
@@ -1026,10 +1028,19 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   }
   const groups: GroupLine[] = [...anchorHits, ...fileGroups];
   const seedNames = seeds.slice(0, 5).map((i) => g.nodes[i]!.file).join(", ");
+  // The model reads rendered text, not details, so the one number that says
+  // whether the change is still closing out has to reach the result itself.
+  // Counts and file names only: the ledger is evidence, never a verdict on the
+  // hypothesis being pursued.
+  const trailer = epochTotals.unresolved > 0
+    ? `obligations · ${epochTotals.unresolved} of ${epochTotals.total} unresolved · ` +
+      `${obligations.slice(0, 3).map((entry) => entry.file).join(", ")}${epochTotals.unresolved > 3 ? ", …" : ""}`
+    : "";
   const fit = revealGroups(groups, {
     header: `fovea impact · changed: ${seedNames}${seeds.length > 5 ? ", …" : ""} · likely review order${extractionSuffix(state)}`,
     budget: B,
     overflowTo: overflowArtifact("impact", `${root}|${(args.files ?? []).join(",")}`),
+    trailer,
   });
   return {
     text: fit.text,
@@ -1075,8 +1086,8 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       ),
       // Persistent obligation checklist: survives disclosure and wall-clock
       // time; cleared only by evidence transitions or an epoch reset.
-      obligations: residual(foveaSession).slice(0, 10),
-      epoch: epochStats(foveaSession),
+      obligations: obligations.slice(0, 10),
+      epoch: epochDecision.rotated ? { ...epochTotals, rotated: true, previous: epochDecision.previous } : epochTotals,
     },
   };
 };

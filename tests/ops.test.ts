@@ -16,7 +16,8 @@ import {
   impact,
   sketch,
 } from "../src/core/ops.js";
-import { resetSessions } from "../src/core/session.js";
+import { getSession, resetSessions } from "../src/core/session.js";
+import { markRead } from "../src/core/obligations.js";
 import * as state from "../src/core/state.js";
 
 const FIXTURE = new URL("./fixtures/mini", import.meta.url).pathname;
@@ -236,6 +237,37 @@ describe.skipIf(!hasAstGrep())("fovea ops on the minimonorepo", () => {
     )).toBe(true);
     // the seed file's own symbols are not part of the review list
     expect(r.text.split("\n").filter((l) => l.startsWith("server/users.go"))).toHaveLength(0);
+  });
+
+  it("renders an obligation count that successful reads close", async () => {
+    resetSessions();
+    const first = await impact(FIXTURE, { files: ["server/users.go"], includeUncommitted: false, budget: 2000 });
+    const epoch = first.details.epoch as { unresolved: number; total: number };
+    expect(epoch.unresolved).toBeGreaterThan(0);
+    expect(first.text).toContain(`obligations · ${epoch.unresolved} of ${epoch.total} unresolved · `);
+
+    // A read is the evidence that closes an obligation; the rendered count is
+    // the half of the signal a model can see without reading details.
+    const listed = (first.details.obligations as Array<{ file: string }>).map((entry) => entry.file);
+    markRead(getSession(FIXTURE), listed);
+    const second = await impact(FIXTURE, { files: ["server/users.go"], includeUncommitted: false, budget: 2000 });
+    expect((second.details.epoch as { unresolved: number }).unresolved).toBe(epoch.unresolved - listed.length);
+  });
+
+  it("rotates the obligation epoch when the change is no longer the one in flight", async () => {
+    resetSessions();
+    const first = await impact(FIXTURE, { files: ["server/users.go"], includeUncommitted: false, budget: 2000 });
+    expect((first.details.epoch as { rotated?: boolean }).rotated).toBeUndefined();
+
+    const grown = await impact(FIXTURE, { files: ["server/users.go", "web/api.ts"], includeUncommitted: false, budget: 2000 });
+    expect((grown.details.epoch as { rotated?: boolean }).rotated).toBeUndefined();
+
+    const next = await impact(FIXTURE, { files: ["worker/events.py"], includeUncommitted: false, budget: 2000 });
+    expect(next.details.epoch).toMatchObject({
+      rotated: true,
+      previous: { unresolved: (grown.details.epoch as { unresolved: number }).unresolved },
+    });
+    expect((next.details.epoch as { total: number }).total).toBeGreaterThan(0);
   });
 
   it("budgets are hard even with hundreds of lit nodes (min clamp)", async () => {

@@ -30,6 +30,8 @@ export interface FoveaSession {
   /** Persistent review obligations for the active change epoch. */
   obligationEpoch?: {
     epochId: string;
+    /** Repo-relative files that opened the epoch; rotation keys on these. */
+    seeds: Set<string>;
     ledger: Map<string, {
       mass: number;
       reasons: string[];

@@ -300,15 +300,17 @@ export interface GroupLine { label: string; mass: number; detail: string; }
 
 export const revealGroups = (
   groups: GroupLine[],
-  opts: { header: string; budget: number; overflowTo?: string },
+  opts: { header: string; budget: number; overflowTo?: string; trailer?: string },
 ): FitResult => {
   const ordered = [...groups].sort((a, b) => b.mass - a.mass || (a.label < b.label ? -1 : 1));
   const artifactNote = opts.overflowTo ? ` — full list saved to ${opts.overflowTo}` : "";
-  const renderK = (k: number, note = artifactNote): string => {
+  // The trailer is constant across every candidate prefix, so the budget fit
+  // stays monotonic in k while still paying for its cost.
+  const renderK = (k: number, note = artifactNote, tail = opts.trailer ? `\n${opts.trailer}` : ""): string => {
     const body = ordered.slice(0, k).map((gl) => `${gl.label.padEnd(2)} ${gl.detail}`);
     const rest = ordered.length - k;
     const footer = rest > 0 ? [`\n… ${rest} more groups omitted${note} — use fovea_focus for detail`] : [];
-    return [opts.header, ...body, ...footer].join("\n");
+    return [opts.header, ...body, ...footer].join("\n") + tail;
   };
   let hi = ordered.length;
   let kBest = ordered.length;
@@ -335,6 +337,9 @@ export const revealGroups = (
       text = renderK(kBest, "");
     }
   }
+  // The trailer is advisory; it never gets to break the hard budget a caller
+  // paid for, even when the header alone already exceeds it.
+  if (opts.trailer && tokenEstimate(text) > opts.budget) text = renderK(kBest, artifactNote, "");
   return {
     text,
     tokens: tokenEstimate(text),

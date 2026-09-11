@@ -328,10 +328,20 @@ Focus, sketch, and the structural diffusion operator remain unchanged.
 
 The obligation ledger keeps the list. Every cascade merges its per-file
 residual mass into a session epoch. Entries stay until evidence moves them. A
-read marks `inspected`. An edit marks `changed` and raises the generation. A
-verified run marks `verified`. A reset clears the epoch. Wall-clock time
+successful `read` marks `inspected`; a landed `edit` or `write` marks
+`changed` and raises the generation, so a touched entry reopens until a later
+read inspects that generation. A reset clears the epoch. Wall-clock time
 touches nothing here, and disclosure removes nothing. A model that saw a file
 still owes the work the ledger records.
+
+The epoch follows the change. `fovea_impact` opens one on the first cascade and
+reuses it while the incoming seeds still share a file with it, so an
+uncommitted diff that keeps growing never loses its checklist. A diff that
+shares no seed with the active epoch is a different change, so the ledger
+rotates: the replacement starts empty and details report `epoch.rotated` with
+the `previous` totals, which keeps the discarded residual visible instead of
+dropping it silently. `markVerified` stays exported for callers that own a real
+verification signal; nothing here invents one.
 
 Impact details carry three separate signals:
 
@@ -343,7 +353,15 @@ edited.
 Total mass stays fixed per connected component, so file masses compare across
 repos of different sizes. Sync gates stay on the older raw scale.
 - `obligations` and `epoch`: the strongest unresolved entries with their
-reasons and generations, plus epoch totals.
+reasons and generations, plus epoch totals. A cascade that rotates the ledger
+adds `epoch.rotated` and `epoch.previous`.
+
+A model reads rendered text, not tool details, so `fovea_impact` also renders
+the convergence count as a one-line trailer — `obligations · 9 of 9 unresolved ·
+web/api.ts, server/main.go, openapi.yaml, …` — and drops it entirely once every
+entry is closed. Reads close entries, so the number only falls as work actually
+lands. The trailer is advisory: it never pushes a result past the budget it was
+called with.
 
 `docs/heat-diffusion.md` has the full mechanics.
 

@@ -8,7 +8,7 @@ type ObligationEpoch = NonNullable<FoveaSession["obligationEpoch"]>;
 type ObligationEntry = ObligationEpoch["ledger"] extends Map<string, infer Entry> ? Entry : never;
 
 type ResidualObligation = ObligationEntry & { file: string };
-type EpochStats = {
+export type EpochStats = {
   total: number;
   unresolved: number;
   inspected: number;
@@ -42,9 +42,13 @@ const nextEpochOrdinal = (session: FoveaSession): number => {
 /** Start a fresh obligation epoch and discard every obligation from the old one. */
 export const openEpoch = (session: FoveaSession, seedFiles: Iterable<string>): ObligationEpoch => {
   const ordinal = nextEpochOrdinal(session);
+  // The seed baseline is copied rather than aliased: rotation compares against
+  // it long after the caller's diff has moved on.
+  const seeds = new Set(seedFiles);
   session.obligationEpoch?.ledger.clear();
   const epoch: ObligationEpoch = {
-    epochId: `obligation-${ordinal.toString(36)}-${seedFingerprint(seedFiles)}`,
+    epochId: `obligation-${ordinal.toString(36)}-${seedFingerprint(seeds)}`,
+    seeds,
     ledger: new Map(),
   };
   session.obligationEpoch = epoch;
@@ -160,4 +164,26 @@ export const epochStats = (session: FoveaSession): EpochStats => {
     stats[entry.status]++;
   }
   return stats;
+};
+
+export type EpochDecision =
+  | { rotated: false }
+  | { rotated: true; previous: EpochStats };
+
+/** Open the active epoch, or rotate it when the incoming change shares no seed
+ * with it. A diff that keeps growing retains every earlier seed, so work in
+ * flight never rotates; a diff sharing nothing is the structural signal that
+ * the change the ledger was tracking is no longer the one being worked on. A
+ * seedless cascade carries no evidence either way and never discards a ledger. */
+export const ensureEpoch = (session: FoveaSession, seedFiles: Iterable<string>): EpochDecision => {
+  const incoming = [...new Set(seedFiles)];
+  const current = session.obligationEpoch;
+  if (!current) {
+    openEpoch(session, incoming);
+    return { rotated: false };
+  }
+  if (!incoming.length || incoming.some((file) => current.seeds.has(file))) return { rotated: false };
+  const previous = epochStats(session);
+  openEpoch(session, incoming);
+  return { rotated: true, previous };
 };

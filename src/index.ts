@@ -13,7 +13,8 @@ import { loadFoveaConfig, type FoveaConfig } from "./core/config.js";
 import { hasAstGrep } from "./core/astgrep.js";
 import { ROOT_CACHE_LIMIT } from "./core/asyncutil.js";
 import { coverageSummary, dwell, ensureStateBackground, focus, impact, sketch } from "./core/ops.js";
-import { observeSessionPaths, resetSessions } from "./core/session.js";
+import { getSession, observeSessionPaths, resetSessions } from "./core/session.js";
+import { markEdited, markRead } from "./core/obligations.js";
 import { captureMutation, finishMutation, type MutationCapture } from "./core/provenance.js";
 import { resetSyncBaselines, sync, syncBaselineStore, warmSync } from "./core/sync.js";
 import type { NodeKind } from "./core/types.js";
@@ -302,6 +303,10 @@ export default function fovea(pi: ExtensionAPI) {
   const WARM_DEBOUNCE_MS = 250;
   const warmTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingMutations = new Map<string, MutationCapture>();
+  // A read closes an obligation only once it succeeds, so the target is held
+  // from tool_execution_start (which carries args) to tool_execution_end
+  // (which carries only the result).
+  const pendingReads = new Map<string, { root: string; path: string }>();
   const warmAfterEdit = (root: string, cfg: FoveaConfig): void => {
     const rels = turnFiles
       .map((p) => (p.startsWith(root + "/") ? p.slice(root.length + 1) : p))
@@ -319,6 +324,7 @@ export default function fovea(pi: ExtensionAPI) {
     for (const timer of warmTimers.values()) clearTimeout(timer);
     warmTimers.clear();
     pendingMutations.clear();
+    pendingReads.clear();
     lifecycleEpoch++;
     turnFiles = [];
     lastSyncError = undefined;
@@ -333,7 +339,10 @@ export default function fovea(pi: ExtensionAPI) {
     const args = event.args as { path?: unknown };
     if (ATTENTION_PATH_TOOLS.has(event.toolName) && typeof args.path === "string") {
       const owner = roots.owner(ctx.cwd, args.path);
-      if (owner) observeSessionPaths(owner.root, [owner.path]);
+      if (owner) {
+        observeSessionPaths(owner.root, [owner.path]);
+        if (event.toolName === "read") pendingReads.set(event.toolCallId, owner);
+      }
     }
     if (event.toolName !== "edit" && event.toolName !== "write") return;
     if (typeof args.path !== "string") return;
@@ -346,10 +355,19 @@ export default function fovea(pi: ExtensionAPI) {
   // Warm once the file is actually on disk (tool_execution_start fires during
   // preflight, before the write lands); the debounce also coalesces bursts.
   pi.on("tool_execution_end", async (event, ctx) => {
+    const read = pendingReads.get(event.toolCallId);
+    if (read) {
+      pendingReads.delete(event.toolCallId);
+      // A failed read revealed nothing, so it cannot close an obligation.
+      if (!event.isError) markRead(getSession(read.root), [read.path]);
+    }
     if (event.toolName !== "edit" && event.toolName !== "write") return;
     const capture = pendingMutations.get(event.toolCallId);
     pendingMutations.delete(event.toolCallId);
     if (!event.isError && capture) {
+      // A landed write is a new file generation: the obligation returns to the
+      // checklist until a later successful read inspects that generation.
+      markEdited(getSession(capture.root), [capture.file]);
       await finishMutation(capture, ctx.sessionManager.getSessionId(), event.toolCallId).catch(() => false);
     }
     if (capture) warmAfterEdit(capture.root, targetConfig(capture.root, ctx));
@@ -568,6 +586,7 @@ export default function fovea(pi: ExtensionAPI) {
         for (const timer of warmTimers.values()) clearTimeout(timer);
         warmTimers.clear();
         pendingMutations.clear();
+        pendingReads.clear();
         turnFiles = [];
         resetSessions();
         resetSyncBaselines();

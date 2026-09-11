@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  ensureEpoch,
   epochStats,
   markEdited,
   markRead,
@@ -139,5 +140,70 @@ describe("persistent residual obligations", () => {
       mass: 0,
     });
     expect(getSession(session.root)).not.toBe(session);
+  });
+});
+
+describe("change-epoch rotation", () => {
+  it("opens an epoch on the first cascade and keeps it while the diff grows", () => {
+    const session = sessionFor("rotate-open");
+    expect(ensureEpoch(session, ["a.ts", "b.ts"]).rotated).toBe(false);
+    mergeWarmed(session, new Map([["client.ts", 1]]), "diffusion residual");
+    expect(session.obligationEpoch?.seeds).toEqual(new Set(["a.ts", "b.ts"]));
+
+    // An uncommitted diff that keeps growing retains every earlier seed, so the
+    // change in flight never loses the checklist it is still working through.
+    expect(ensureEpoch(session, ["a.ts", "b.ts", "client.ts"]).rotated).toBe(false);
+    expect(residual(session).map((entry) => entry.file)).toEqual(["client.ts"]);
+  });
+
+  it("rotates when the cascade shares no seed with the active change", () => {
+    const session = sessionFor("rotate-disjoint");
+    ensureEpoch(session, ["a.ts"]);
+    mergeWarmed(session, new Map([["client.ts", 2]]), "diffusion residual");
+    const first = session.obligationEpoch!.epochId;
+
+    const decision = ensureEpoch(session, ["unrelated.ts"]);
+
+    expect(decision).toEqual({
+      rotated: true,
+      previous: {
+        total: 1,
+        unresolved: 1,
+        inspected: 0,
+        changed: 0,
+        verified: 0,
+        mass: 2,
+      },
+    });
+    expect(session.obligationEpoch!.epochId).not.toBe(first);
+    expect(session.obligationEpoch!.seeds).toEqual(new Set(["unrelated.ts"]));
+    expect(residual(session)).toEqual([]);
+  });
+
+  it("never discards a ledger for a seedless or repeated cascade", () => {
+    const session = sessionFor("rotate-guard");
+    ensureEpoch(session, ["a.ts"]);
+    mergeWarmed(session, new Map([["client.ts", 1]]), "diffusion residual");
+
+    expect(ensureEpoch(session, []).rotated).toBe(false);
+    expect(ensureEpoch(session, ["a.ts"]).rotated).toBe(false);
+    expect(residual(session).map((entry) => entry.file)).toEqual(["client.ts"]);
+  });
+
+  it("does not resurrect an obligation that a rotation dropped", () => {
+    const session = sessionFor("rotate-drop");
+    ensureEpoch(session, ["a.ts"]);
+    mergeWarmed(session, new Map([["client.ts", 1]]), "diffusion residual");
+    ensureEpoch(session, ["b.ts"]);
+
+    markRead(session, ["client.ts"]);
+    expect(epochStats(session)).toEqual({
+      total: 0,
+      unresolved: 0,
+      inspected: 0,
+      changed: 0,
+      verified: 0,
+      mass: 0,
+    });
   });
 });

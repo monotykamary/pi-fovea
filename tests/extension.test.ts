@@ -7,7 +7,9 @@ import { tmpdir as systemTmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import extension from "../src/index.js";
-import { resetSessions } from "../src/core/session.js";
+import { getSession, resetSessions } from "../src/core/session.js";
+import { epochStats, markRead, mergeWarmed, openEpoch, residual } from "../src/core/obligations.js";
+import { canonicalPath } from "../src/core/roots.js";
 import { captureMutation, finishMutation, provenancePathFor } from "../src/core/provenance.js";
 import { hasAstGrep } from "../src/core/astgrep.js";
 import { cachePathFor } from "../src/core/build.js";
@@ -209,6 +211,52 @@ describe("extension entry", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  // The obligation lifecycle is driven by host hooks, not by the graph ops, so
+  // these hold without ast-grep: only the tool-event dispatch is under test.
+  it("closes an obligation only when a read completes through the host hook", async () => {
+    resetSessions();
+    const loaded = load();
+    const ctx = fakeCtx(FIXTURE);
+    const session = getSession(canonicalPath(FIXTURE));
+    openEpoch(session, ["server/users.go"]);
+    mergeWarmed(session, new Map([["web/api.ts", 1]]), "diffusion residual");
+    const file = path.join(FIXTURE, "web/api.ts");
+
+    // A read that failed revealed nothing, so it cannot close the entry.
+    await loaded.emit("tool_execution_start", { toolCallId: "read-failed", toolName: "read", args: { path: file } }, ctx);
+    await loaded.emit("tool_execution_end", { toolCallId: "read-failed", toolName: "read", result: {}, isError: true }, ctx);
+    expect(epochStats(session)).toMatchObject({ unresolved: 1, inspected: 0 });
+
+    await loaded.emit("tool_execution_start", { toolCallId: "read-ok", toolName: "read", args: { path: file } }, ctx);
+    await loaded.emit("tool_execution_end", { toolCallId: "read-ok", toolName: "read", result: {}, isError: false }, ctx);
+    expect(epochStats(session)).toMatchObject({ unresolved: 0, inspected: 1 });
+    expect(residual(session)).toEqual([]);
+  });
+
+  it("reopens an inspected obligation when an edit lands through the host hook", async () => {
+    resetSessions();
+    const loaded = load();
+    const ctx = fakeCtx(FIXTURE);
+    const session = getSession(canonicalPath(FIXTURE));
+    openEpoch(session, ["server/users.go"]);
+    mergeWarmed(session, new Map([["web/api.ts", 1]]), "diffusion residual");
+    markRead(session, ["web/api.ts"]);
+    expect(epochStats(session)).toMatchObject({ unresolved: 0, inspected: 1 });
+
+    const file = path.join(FIXTURE, "web/api.ts");
+    await loaded.emit("tool_execution_start", { toolCallId: "edit-1", toolName: "edit", args: { path: file } }, ctx);
+    await loaded.emit("tool_execution_end", { toolCallId: "edit-1", toolName: "edit", result: {}, isError: false }, ctx);
+    expect(session.obligationEpoch!.ledger.get("web/api.ts")).toMatchObject({ generation: 1, status: "changed" });
+
+    // A failed edit left the file alone, so the generation must not advance.
+    await loaded.emit("tool_execution_start", { toolCallId: "edit-2", toolName: "edit", args: { path: file } }, ctx);
+    await loaded.emit("tool_execution_end", { toolCallId: "edit-2", toolName: "edit", result: {}, isError: true }, ctx);
+    expect(session.obligationEpoch!.ledger.get("web/api.ts")).toMatchObject({ generation: 1, status: "changed" });
+
+    // Drop the debounced warm the edit hooks scheduled; nothing here needs sync.
+    await loaded.emit("session_shutdown", {}, ctx);
   });
 });
 
