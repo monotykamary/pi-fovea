@@ -6,7 +6,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { ROOT_CACHE_LIMIT } from "./asyncutil.js";
 import type { NodeKind } from "./types.js";
-import { observeReviewRevision, type ReviewMemory } from "./review.js";
 
 interface FocusScope {
   path?: string;
@@ -28,8 +27,6 @@ export interface FoveaSession {
   syncScopes: Set<string>;
   tk: Float64Array[];
   tkKey: string;
-  /** Bounded, advisory exposure history; independent of current salience. */
-  reviewMemory?: ReviewMemory;
 }
 
 export const FOCUS_T0 = 2;
@@ -60,7 +57,6 @@ export const getSession = (root: string): FoveaSession => {
   sessions.set(root, s);
   while (sessions.size > ROOT_CACHE_LIMIT) {
     const oldest = sessions.keys().next().value!;
-    sessions.get(oldest)?.reviewMemory?.entries.clear();
     sessions.delete(oldest);
   }
   return s;
@@ -93,13 +89,7 @@ export const observeSessionPaths = (root: string, paths: readonly string[]): str
   return [...session.syncScopes].sort();
 };
 
-/** Reconcile content drift regardless of mutation path, without enrolling a session. */
-export const refreshSessionReviews = (root: string, revisionFor: (file: string) => string | undefined): void => {
-  const memory = sessions.get(root)?.reviewMemory;
-  for (const file of memory?.entries.keys() ?? []) observeReviewRevision(memory, file, revisionFor(file));
-};
-
-/** Drop index-addressed focus state while preserving attention and review memory. */
+/** Drop index-addressed focus state while preserving session attention. */
 export const clearSessionFocus = (session: FoveaSession): void => {
   session.t = FOCUS_T0;
   session.seeds = [];
@@ -114,11 +104,6 @@ export const clearSessionFocus = (session: FoveaSession): void => {
 
 // `/new` and friends: same repo, fresh eyes.
 export const resetSessions = (): void => {
-  // Retained captures cannot acknowledge reads across a conversation reset.
-  for (const session of sessions.values()) {
-    session.reviewMemory?.entries.clear();
-    delete session.reviewMemory;
-  }
   // A fresh conversation cannot reuse disclosure or Chebyshev vectors; drop
   // the entries outright so large Float64Array stacks become collectible.
   sessions.clear();

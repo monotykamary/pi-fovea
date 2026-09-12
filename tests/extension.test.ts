@@ -8,8 +8,6 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import extension from "../src/index.js";
 import { getSession, resetSessions } from "../src/core/session.js";
-import { createReadTool } from "@earendil-works/pi-coding-agent";
-import { reviewReport, updateReviewMemory } from "../src/core/review.js";
 import { canonicalPath } from "../src/core/roots.js";
 import { captureMutation, finishMutation, provenancePathFor } from "../src/core/provenance.js";
 import { hasAstGrep } from "../src/core/astgrep.js";
@@ -214,60 +212,25 @@ describe("extension entry", () => {
     }
   });
 
-  // Host hooks acknowledge actual source windows, not tool names or completion.
-  it("records exposure only after a successful matching read result", async () => {
+  it("read events establish path attention without inspecting or retaining read results", async () => {
     resetSessions();
     const loaded = load();
     const ctx = fakeCtx(FIXTURE);
-    const session = getSession(canonicalPath(FIXTURE));
-    const memory = updateReviewMemory(session, ["server/users.go"], new Map([
-      ["web/api.ts", { salience: 1, revision: undefined, reasons: ["shared route"] }],
-    ]));
-    const args = { path: path.join(FIXTURE, "web/api.ts"), offset: 2, limit: 2 };
-    await loaded.emit("tool_execution_start", { toolCallId: "failed", toolName: "read", args }, ctx);
-    await loaded.emit("tool_execution_end", { toolCallId: "failed", toolName: "read", result: {}, isError: true }, ctx);
-    expect(reviewReport(memory)).toMatchObject({ unseen: 1, seen: 0 });
-    await loaded.emit("tool_execution_start", { toolCallId: "ok", toolName: "read", args }, ctx);
-    const result = await createReadTool(FIXTURE).execute("ok", args);
-    await loaded.emit("tool_execution_end", { toolCallId: "ok", toolName: "read", result, isError: false }, ctx);
-    expect(reviewReport(memory)).toMatchObject({ unseen: 0, seen: 1,
-      entries: [{ exposure: { windows: [{ start: 2, end: 3 }] } }] });
-    expect(loaded.messages).toEqual([]);
-    await loaded.emit("session_shutdown", {}, ctx);
-  });
-
-  it("stales exposure after a real edit, but not failed or no-op writes", async () => {
-    resetSessions();
-    const root = mkdtempSync(path.join(tmpdir(), "pi-fovea-review-hooks-"));
-    const file = path.join(root, "file.ts");
-    writeFileSync(file, "export const value = 1;\n");
-    const loaded = load();
-    const ctx = fakeCtx(root);
     try {
-      const memory = updateReviewMemory(getSession(root), ["seed.ts"], new Map([
-        ["file.ts", { salience: 1, revision: undefined, reasons: ["call"] }],
-      ]));
-      const read = async () => {
-        await loaded.emit("tool_execution_start", { toolCallId: "read", toolName: "read", args: { path: file } }, ctx);
-        const result = await createReadTool(root).execute("read", { path: file });
-        await loaded.emit("tool_execution_end", { toolCallId: "read", toolName: "read", result, isError: false }, ctx);
-      };
-      await read();
-      expect(reviewReport(memory).seen).toBe(1);
-      await loaded.emit("tool_execution_start", { toolCallId: "edit", toolName: "edit", args: { path: file } }, ctx);
-      writeFileSync(file, "export const value = 2;\n");
-      await loaded.emit("tool_execution_end", { toolCallId: "edit", toolName: "edit", result: {}, isError: false }, ctx);
-      expect(reviewReport(memory)).toMatchObject({ stale: 1, seen: 0 });
-      await read();
-      for (const isError of [true, false]) {
-        await loaded.emit("tool_execution_start", { toolCallId: "noop", toolName: "write", args: { path: file } }, ctx);
-        await loaded.emit("tool_execution_end", { toolCallId: "noop", toolName: "write", result: {}, isError }, ctx);
-        expect(reviewReport(memory)).toMatchObject({ stale: 0, seen: 1 });
+      const args = { path: path.join(FIXTURE, "web/api.ts"), offset: 2, limit: 2 };
+      const session = getSession(canonicalPath(FIXTURE));
+      const result = { get content(): never { throw new Error("read results must remain opaque"); } };
+      for (const isError of [false, true]) {
+        await loaded.emit("tool_execution_start", { toolCallId: "read", toolName: "read", args }, ctx);
+        expect([...session.syncScopes]).toEqual(["web"]);
+        const before = structuredClone(session);
+        await loaded.emit("tool_execution_end", { toolCallId: "read", toolName: "read", result, isError }, ctx);
+        expect(session).toEqual(before);
       }
+      expect(session).not.toHaveProperty("reviewMemory");
       expect(loaded.messages).toEqual([]);
     } finally {
       await loaded.emit("session_shutdown", {}, ctx);
-      rmSync(root, { recursive: true, force: true });
     }
   });
 });

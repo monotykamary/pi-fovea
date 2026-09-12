@@ -14,7 +14,6 @@ import { detectBasins } from "./basins.js";
 import { classifyLiteral, normalizeLiteral } from "./join.js";
 import { isTestFile } from "./extract.js";
 import { effectiveWeight, expectationResiduals, type CoChangeHistory } from "./cochange.js";
-import { reviewReport, reviewTrailer, updateReviewMemory, type ReviewSample } from "./review.js";
 import type { EdgeEvidence, Graph, NodeKind, NodeRec } from "./types.js";
 import { ensureState, explainPathCoverage } from "./state.js";
 import type { RepoState } from "./state.js";
@@ -813,14 +812,11 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       .map((entry) => `\n! ${entry.path ?? entry.requested}: ${entry.reason}.`)
       .join("");
     const text = `fovea impact: no seed files (repo clean or paths unknown). Pass files: [...] or symbols: [...] for a what-if cascade.${gaps}`;
-    const session = getSession(root);
-    if (session.reviewMemory) updateReviewMemory(session, [], new Map());
-    const review = reviewReport(session.reviewMemory);
-    const fit = revealGroups([], { header: text, budget: B, trailer: reviewTrailer(review) });
+    const fit = revealGroups([], { header: text, budget: B });
     return {
       text: fit.text,
       tokens: fit.tokens,
-      details: { seeds: 0, requestedCoverage, ...extractionDetails(state), review },
+      details: { seeds: 0, requestedCoverage, ...extractionDetails(state) },
     };
   }
   const seeds = [...seedSet];
@@ -1004,19 +1000,6 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
     for (const [k, v] of warmed.slice(0, 2000)) warmedNodes[k] = v;
   }
 
-  // Current salience ranks; hysteretic exposure survives cooling. Repeating
-  // this cascade cannot manufacture more work or certify its completion.
-  const samples = new Map<string, ReviewSample>();
-  for (const file of new Set([...fileAgg.keys(), ...companionResiduals.keys()])) {
-    samples.set(file, {
-      salience: Math.max(fileAgg.get(file) ?? 0, companionResiduals.get(file) ?? 0),
-      reasons: [...(reasonByFile.get(file) ?? []),
-        ...(companionResiduals.has(file) ? ["unmet co-change companion"] : [])],
-      revision: state.facts[file]?.sha1 ?? state.store.failedSha?.get(file),
-    });
-  }
-  const review = reviewReport(updateReviewMemory(getSession(root), seedFiles, samples));
-
   const fileEntries = [...fileAgg.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const fileGroups: GroupLine[] = [];
   for (const [file, mass] of fileEntries) {
@@ -1032,17 +1015,12 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       detail: `via ${reasons.join(", ")}${top ? ` · top: ${top}` : ""}`,
     });
   }
-  // Retained cold suggestions remain reachable in the full overflow artifact.
-  const remembered = review.entries.filter((entry) => entry.status !== "seen" && !fileAgg.has(entry.file))
-    .map((entry) => ({ label: entry.file, mass: entry.salience, detail: `review memory: ${entry.status}` }));
-  const groups: GroupLine[] = [...anchorHits, ...fileGroups, ...remembered];
+  const groups: GroupLine[] = [...anchorHits, ...fileGroups];
   const seedNames = seeds.slice(0, 5).map((i) => g.nodes[i]!.file).join(", ");
-  const trailer = reviewTrailer(review);
   const fit = revealGroups(groups, {
     header: `fovea impact · changed: ${seedNames}${seeds.length > 5 ? ", …" : ""} · likely review order${extractionSuffix(state)}`,
     budget: B,
     overflowTo: overflowArtifact("impact", `${root}|${(args.files ?? []).join(",")}`),
-    trailer,
   });
   return {
     text: fit.text,
@@ -1086,8 +1064,6 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
           .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
           .map(([file, mass]) => [file, Number(mass.toFixed(6))]),
       ),
-      // Bounded exposure history, not a completion or verification ledger.
-      review,
     },
   };
 };

@@ -1,7 +1,7 @@
 // End-to-end over the fixture: graph build, the four ops, budget conformance,
 // and the session delta contract.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { hasAstGrep } from "../src/core/astgrep.js";
 import { assembleGraphWithIndex as assembleGraphFromBuild } from "../src/core/build.js";
 import { assembleGraphWithIndex } from "../src/core/graph.js";
@@ -17,7 +17,6 @@ import {
   sketch,
 } from "../src/core/ops.js";
 import { getSession, resetSessions } from "../src/core/session.js";
-import { recordReviewRead, reviewReport } from "../src/core/review.js";
 import * as state from "../src/core/state.js";
 
 const FIXTURE = new URL("./fixtures/mini", import.meta.url).pathname;
@@ -239,39 +238,55 @@ describe.skipIf(!hasAstGrep())("fovea ops on the minimonorepo", () => {
     expect(r.text.split("\n").filter((l) => l.startsWith("server/users.go"))).toHaveLength(0);
   });
 
-  it("renders advisory exposure counts without accumulating repeated impact", async () => {
+  it("impact depends on the current cascade, not earlier impact or focus disclosure", async () => {
     resetSessions();
-    const args = { files: ["server/users.go"], includeUncommitted: false, budget: 2000 };
-    const first = await impact(FIXTURE, args);
-    const review = first.details.review as ReturnType<typeof reviewReport>;
-    expect(review.unseen).toBeGreaterThan(0);
-    expect(first.text).toContain(`review memory · ${review.unseen} unread · 0 stale · 0 seen (windows only)`);
-    expect(first.details).not.toHaveProperty("obligations");
-    expect(first.details).not.toHaveProperty("epoch");
-    const repeated = await impact(FIXTURE, args);
-    expect(repeated.details.review).toEqual(review);
-    const listed = review.entries.filter((entry) => entry.revision).slice(0, 3);
-    for (const entry of listed) recordReviewRead(getSession(FIXTURE).reviewMemory!, entry.file, entry.revision!, { start: 1, end: 1 });
-    const second = await impact(FIXTURE, args);
-    expect(second.details.review).toMatchObject({ unseen: review.unseen - listed.length, seen: listed.length, stale: 0 });
-    for (const B of [256, 300, 512]) {
-      const bounded = await impact(FIXTURE, { ...args, budget: B });
-      expect(bounded.tokens).toBeLessThanOrEqual(B);
-      expect((bounded.details.review as ReturnType<typeof reviewReport>).total).toBe(review.total);
+    const prepared = await ensureState(FIXTURE);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    try {
+      const session = getSession(FIXTURE);
+      const initial = structuredClone(session);
+      const args = { files: ["server/users.go"], includeUncommitted: false, budget: 2000 };
+      const first = await impact(FIXTURE, args, prepared);
+      expect(session).toEqual(initial);
+      await impact(FIXTURE, { ...args, files: ["worker/jobs.py"] }, prepared);
+      await focus(FIXTURE, "users", 2000);
+      const focused = structuredClone(session);
+      expect(await impact(FIXTURE, args, prepared)).toEqual(first);
+      expect(session).toEqual(focused);
+      expect(session).not.toHaveProperty("reviewMemory");
+    } finally {
+      clock.mockRestore();
+      resetSessions();
     }
-    const clean = await impact(FIXTURE, { files: [], includeUncommitted: false, budget: 256 });
-    expect(clean.tokens).toBeLessThanOrEqual(256);
-    expect(clean.details.review).toMatchObject({ total: review.total, seen: listed.length });
   });
 
-  it("discloses review memory cleared by a disjoint change epoch", async () => {
+  it("reports current heat within budget without retaining seedless suggestions", async () => {
     resetSessions();
-    const first = await impact(FIXTURE, { files: ["server/users.go"], includeUncommitted: false, budget: 2000 });
-    const grown = await impact(FIXTURE, { files: ["server/users.go", "web/api.ts"], includeUncommitted: false, budget: 2000 });
-    expect((grown.details.review as ReturnType<typeof reviewReport>).epoch).toBe((first.details.review as ReturnType<typeof reviewReport>).epoch);
-    const next = await impact(FIXTURE, { files: ["worker/events.py"], includeUncommitted: false, budget: 2000 });
-    expect(next.details.review).toMatchObject({ previous: { total: (grown.details.review as ReturnType<typeof reviewReport>).total } });
-    expect(next.text).toContain("prior epoch cleared:");
+    const prepared = await ensureState(FIXTURE);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    try {
+      const args = { files: ["server/users.go"], includeUncommitted: false };
+      const first = await impact(FIXTURE, { ...args, budget: 2000 }, prepared);
+      for (const B of [256, 300, 512, 2000]) {
+        const bounded = await impact(FIXTURE, { ...args, budget: B }, prepared);
+        expect(bounded.tokens).toBeLessThanOrEqual(B);
+        expect(bounded.details.warmedMass).toEqual(first.details.warmedMass);
+        expect(bounded.details.conservedMass).toEqual(first.details.conservedMass);
+        for (const key of ["review", "obligations", "epoch"]) expect(bounded.details).not.toHaveProperty(key);
+        expect(bounded.text).not.toMatch(/review memory|obligations ·|prior epoch cleared/);
+      }
+      for (const files of [[], ["nope/nothing.ts"]]) {
+        const clean = await impact(FIXTURE, { files, includeUncommitted: false, budget: 256 }, prepared);
+        expect(clean.tokens).toBeLessThanOrEqual(256);
+        expect(clean.details.seeds).toBe(0);
+        expect(clean.text).toContain("no seed files");
+        expect(clean.text).not.toContain("web/api.ts");
+        for (const key of ["review", "obligations", "epoch", "warmedFiles"]) expect(clean.details).not.toHaveProperty(key);
+      }
+    } finally {
+      clock.mockRestore();
+      resetSessions();
+    }
   });
 
   it("budgets are hard even with hundreds of lit nodes (min clamp)", async () => {
