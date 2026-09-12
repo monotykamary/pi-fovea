@@ -17,7 +17,7 @@ import {
   sketch,
 } from "../src/core/ops.js";
 import { getSession, resetSessions } from "../src/core/session.js";
-import { markRead } from "../src/core/obligations.js";
+import { recordReviewRead, reviewReport } from "../src/core/review.js";
 import * as state from "../src/core/state.js";
 
 const FIXTURE = new URL("./fixtures/mini", import.meta.url).pathname;
@@ -239,35 +239,39 @@ describe.skipIf(!hasAstGrep())("fovea ops on the minimonorepo", () => {
     expect(r.text.split("\n").filter((l) => l.startsWith("server/users.go"))).toHaveLength(0);
   });
 
-  it("renders an obligation count that successful reads close", async () => {
+  it("renders advisory exposure counts without accumulating repeated impact", async () => {
     resetSessions();
-    const first = await impact(FIXTURE, { files: ["server/users.go"], includeUncommitted: false, budget: 2000 });
-    const epoch = first.details.epoch as { unresolved: number; total: number };
-    expect(epoch.unresolved).toBeGreaterThan(0);
-    expect(first.text).toContain(`obligations · ${epoch.unresolved} of ${epoch.total} unresolved · `);
-
-    // A read is the evidence that closes an obligation; the rendered count is
-    // the half of the signal a model can see without reading details.
-    const listed = (first.details.obligations as Array<{ file: string }>).map((entry) => entry.file);
-    markRead(getSession(FIXTURE), listed);
-    const second = await impact(FIXTURE, { files: ["server/users.go"], includeUncommitted: false, budget: 2000 });
-    expect((second.details.epoch as { unresolved: number }).unresolved).toBe(epoch.unresolved - listed.length);
+    const args = { files: ["server/users.go"], includeUncommitted: false, budget: 2000 };
+    const first = await impact(FIXTURE, args);
+    const review = first.details.review as ReturnType<typeof reviewReport>;
+    expect(review.unseen).toBeGreaterThan(0);
+    expect(first.text).toContain(`review memory · ${review.unseen} unread · 0 stale · 0 seen (windows only)`);
+    expect(first.details).not.toHaveProperty("obligations");
+    expect(first.details).not.toHaveProperty("epoch");
+    const repeated = await impact(FIXTURE, args);
+    expect(repeated.details.review).toEqual(review);
+    const listed = review.entries.filter((entry) => entry.revision).slice(0, 3);
+    for (const entry of listed) recordReviewRead(getSession(FIXTURE).reviewMemory!, entry.file, entry.revision!, { start: 1, end: 1 });
+    const second = await impact(FIXTURE, args);
+    expect(second.details.review).toMatchObject({ unseen: review.unseen - listed.length, seen: listed.length, stale: 0 });
+    for (const B of [256, 300, 512]) {
+      const bounded = await impact(FIXTURE, { ...args, budget: B });
+      expect(bounded.tokens).toBeLessThanOrEqual(B);
+      expect((bounded.details.review as ReturnType<typeof reviewReport>).total).toBe(review.total);
+    }
+    const clean = await impact(FIXTURE, { files: [], includeUncommitted: false, budget: 256 });
+    expect(clean.tokens).toBeLessThanOrEqual(256);
+    expect(clean.details.review).toMatchObject({ total: review.total, seen: listed.length });
   });
 
-  it("rotates the obligation epoch when the change is no longer the one in flight", async () => {
+  it("discloses review memory cleared by a disjoint change epoch", async () => {
     resetSessions();
     const first = await impact(FIXTURE, { files: ["server/users.go"], includeUncommitted: false, budget: 2000 });
-    expect((first.details.epoch as { rotated?: boolean }).rotated).toBeUndefined();
-
     const grown = await impact(FIXTURE, { files: ["server/users.go", "web/api.ts"], includeUncommitted: false, budget: 2000 });
-    expect((grown.details.epoch as { rotated?: boolean }).rotated).toBeUndefined();
-
+    expect((grown.details.review as ReturnType<typeof reviewReport>).epoch).toBe((first.details.review as ReturnType<typeof reviewReport>).epoch);
     const next = await impact(FIXTURE, { files: ["worker/events.py"], includeUncommitted: false, budget: 2000 });
-    expect(next.details.epoch).toMatchObject({
-      rotated: true,
-      previous: { unresolved: (grown.details.epoch as { unresolved: number }).unresolved },
-    });
-    expect((next.details.epoch as { total: number }).total).toBeGreaterThan(0);
+    expect(next.details.review).toMatchObject({ previous: { total: (grown.details.review as ReturnType<typeof reviewReport>).total } });
+    expect(next.text).toContain("prior epoch cleared:");
   });
 
   it("budgets are hard even with hundreds of lit nodes (min clamp)", async () => {

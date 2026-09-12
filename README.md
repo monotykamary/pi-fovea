@@ -58,7 +58,7 @@ and test commands in your loop. CI has the final say.
 | `fovea_sketch` | where is everything? | production-first silhouette plus explicit discovery/extraction coverage; test and fixture architecture stays collapsed |
 | `fovea_focus` | what is this? | exact symbols/routes/protocol ids, evidenced relationships, path-gap reasons, suggested reads, scopes, and deterministic `fresh` views |
 | `fovea_dwell` | what else? | widens the current focus, or expires safely when its graph generation changed |
-| `fovea_impact` | what does this touch? | hunk-precise seeds, evidenced review paths, unmet co-change companions, and a persistent obligation checklist |
+| `fovea_impact` | what does this touch? | hunk-precise seeds, evidenced review paths, unmet co-change companions, and bounded, revision-aware review memory |
 | `grep` *(default hybrid)* | graph or text? | bare identifiers, qualified symbols, repo paths, and routes use Fovea; search options and obvious regex retain native grep |
 
 Focus normalizes camelCase and common inflections. An approximate name such as
@@ -303,65 +303,29 @@ environment override still turns sync off with:
 FOVEA_TURN_SYNC=off pi
 ```
 
-## Salience and obligations
+## Salience and review memory
 
-`fovea_impact` keeps two clocks on the same graph.
+`fovea_impact` separates current salience from remembered source exposure.
 
-Heat finds what matters now. Seeds come from the diff. Hunk parsing maps each
-change to the symbols that contain it. One unit of mass goes to each changed
-file: `0.2` on the file node, `0.8` over the touched symbols in proportion to
-`sqrt(changed lines)`. Heat then spreads along static edges and along co-change
-partners, and decays with wall-clock time. Edits that resist symbol-level
-location fall back to the old file-node seed. New files, deletions, renames,
-untracked paths, and oversized diffs all take that path.
+Heat finds what matters now. Seeds come from the diff. Hunk parsing maps each change to the symbols that contain it. One unit of mass goes to each changed file: `0.2` on the file node, `0.8` over the touched symbols in proportion to `sqrt(changed lines)`. Heat then spreads along static edges and along co-change partners, and decays with wall-clock time. Edits that resist symbol-level location fall back to the old file-node seed. New files, deletions, renames, untracked paths, and oversized diffs all take that path.
 
-Historical co-change is a decaying **heat prior**, never a permanent graph edge.
-It counts up to 400 first-parent integration boundaries: merge net changes count
-once, not again through their constituent commits. Explicit `fixup!`/`squash!`
-followups join only uniquely resolved older subjects in that window. Time,
-author, shared issue numbers, and unlabeled "forgot this" do not group work.
-Boundaries are not proof of a semantic feature (release merges can mix work).
-Aggregates above 24 tracked files emit no pairs but retain directional touch
-counts; two distinct retained units are needed for a pair, three for expectations.
-Raw history caching includes shallow-state identity; recency still applies at use.
-Focus, sketch, and the structural diffusion operator remain unchanged.
+Historical co-change is a decaying **heat prior**, never a permanent graph edge. It counts up to 400 first-parent integration boundaries: merge net changes count once, not again through their constituent commits. Explicit `fixup!`/`squash!` followups join only uniquely resolved older subjects in that window. Time, author, shared issue numbers, and unlabeled "forgot this" do not group work. Boundaries are not proof of a semantic feature (release merges can mix work). Aggregates above 24 tracked files emit no pairs but retain directional touch counts; two distinct retained units are needed for a pair, three for expectations. Raw history caching includes shallow-state identity; recency still applies at use. Focus, sketch, and the structural diffusion operator remain unchanged.
 
-The obligation ledger keeps the list. Every cascade merges its per-file
-residual mass into a session epoch. Entries stay until evidence moves them. A
-successful `read` marks `inspected`; a landed `edit` or `write` marks
-`changed` and raises the generation, so a touched entry reopens until a later
-read inspects that generation. A reset clears the epoch. Wall-clock time
-touches nothing here, and disclosure removes nothing. A model that saw a file
-still owes the work the ledger records.
+Review memory is **hysteretic**, not conserved work: like a resettable thermal history indicator, its state remembers an earlier event after the heat changes. Each suggested file has independent current `salience` and exposure state: `unseen`, `seen`, or `stale`. Repeated impact calls replace salience rather than accumulating invocation-count debt. Cooling and disclosure do not acknowledge a read. This memory neither proves correctness nor gates completion or starts turns.
 
-The epoch follows the change. `fovea_impact` opens one on the first cascade and
-reuses it while the incoming seeds still share a file with it, so an
-uncommitted diff that keeps growing never loses its checklist. A diff that
-shares no seed with the active epoch is a different change, so the ledger
-rotates: the replacement starts empty and details report `epoch.rotated` with
-the `previous` totals, which keeps the discarded residual visible instead of
-dropping it silently. `markVerified` stays exported for callers that own a real
-verification signal; nothing here invents one.
+A successful local `read` records only returned source windows at a content SHA-1. `seen` means source exposure, not whole-file inspection or understanding. The host checks matching text and stable before/after snapshots; requested limits are not treated as returned lines. Failed, diagnostic-only, rewritten, or racing reads earn no acknowledgment. Snapshot capture is bounded to 1 MiB per retained file, with at most 16 merged windows per revision (`windowsOmitted` reports loss). Reads before a file enters review memory are not tracked. Thus `unread` means **no matching read observed while retained**, not proof that nobody read it.
 
-Impact details carry three separate signals:
+A changed content hash makes previous exposure `stale`, including comment-only, shell, Fabric, and editor changes when the graph next refreshes. Reverting a file does not erase the stale marker; another matching read does. This is file-local exposure history, not a sound dependency-based verification system. Semantic surprise and turn steering retain their existing separate rules.
 
-- `expectedButUnchanged`: files with strong directional co-change history that
-stayed out of this diff. A Wilson lower bound drives the score, with lift,
-support, and recency gates. Treat it as the alarm for the serializer nobody
-edited.
-- `conservedMass`: the same cascade under degree-corrected random-walk heat.
-Total mass stays fixed per connected component, so file masses compare across
-repos of different sizes. Sync gates stay on the older raw scale.
-- `obligations` and `epoch`: the strongest unresolved entries with their
-reasons and generations, plus epoch totals. A cascade that rotates the ledger
-adds `epoch.rotated` and `epoch.previous`.
+Memory holds at most 512 files, preferring current salience. `evicted` counts retained entries actually forgotten; `omitted` counts new candidates not retained in the latest cascade. Repeated omitted candidates do not accumulate debt. A disjoint seed set starts a new review epoch and reports the discarded totals as `review.previous`; overlapping/growing changes retain their epoch. Reset, reload, and session replacement clear this advisory memory rather than persist it.
 
-A model reads rendered text, not tool details, so `fovea_impact` also renders
-the convergence count as a one-line trailer — `obligations · 9 of 9 unresolved ·
-web/api.ts, server/main.go, openapi.yaml, …` — and drops it entirely once every
-entry is closed. Reads close entries, so the number only falls as work actually
-lands. The trailer is advisory: it never pushes a result past the budget it was
-called with.
+Impact details carry three distinct signals:
+
+- `expectedButUnchanged`: likely missing companions inferred from directional co-change history. These are review suggestions, not required edits.
+- `conservedMass`: degree-corrected random-walk heat; mathematical conservation of diffusion mass is unrelated to review accounting. Sync keeps its raw scale.
+- `review`: retained entries with salience, reasons, revision, exposure windows, `unseen`/`seen`/`stale` totals, epoch, and retention-loss information. This replaces the former `obligations` and top-level `epoch` fields; the verification transition has been removed rather than relabeled.
+
+The budgeted trailer says `review memory · 3 unread · 1 stale · 2 seen (windows only)` and names the strongest pending suggestions. Evictions and prior-epoch loss appear there when budget permits and always in structured details. Cold pending entries remain accessible in the full impact overflow list. Zero unread or stale entries means no pending *retained review suggestions*, never feature completion. The CLI has no host read events; inspection tracking belongs to the in-session extension.
 
 `docs/heat-diffusion.md` has the full mechanics.
 

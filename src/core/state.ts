@@ -20,6 +20,7 @@ import { buildCsr, type Csr } from "./heat.js";
 import type { JoinIndex } from "./join.js";
 import { coChangeHistory, type CoChangeHistory } from "./cochange.js";
 import type { EdgeEvidence, Graph } from "./types.js";
+import { refreshSessionReviews } from "./session.js";
 
 export interface RepoState {
   root: string;
@@ -385,7 +386,7 @@ export const ensureState = (root: string, opts: { hints?: string[]; force?: bool
   const pending = inflight.get(root);
   if (pending) return pending;
   const warm = touch(root);
-  const p: Promise<RepoState> = warm
+  const p: Promise<RepoState> = (warm
     ? refreshState(warm, opts.hints, opts.force)
     : (async () => {
         const st = await stat(root).catch(() => undefined);
@@ -394,7 +395,12 @@ export const ensureState = (root: string, opts: { hints?: string[]; force?: bool
         states.set(root, state);
         evictLru();
         return state;
-      })();
+      })()).then((state) => {
+        // Even comment-only and out-of-band changes stale prior source exposure;
+        // this does not alter sync's semantic surprise gate or trigger turns.
+        refreshSessionReviews(root, (file) => state.facts[file]?.sha1 ?? state.store.failedSha.get(file));
+        return state;
+      });
   inflight.set(root, p);
   const clear = (): void => {
     if (inflight.get(root) === p) inflight.delete(root);

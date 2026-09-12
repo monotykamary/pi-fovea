@@ -14,7 +14,7 @@ import { detectBasins } from "./basins.js";
 import { classifyLiteral, normalizeLiteral } from "./join.js";
 import { isTestFile } from "./extract.js";
 import { effectiveWeight, expectationResiduals, type CoChangeHistory } from "./cochange.js";
-import { ensureEpoch, epochStats, mergeWarmed, residual } from "./obligations.js";
+import { reviewReport, reviewTrailer, updateReviewMemory, type ReviewSample } from "./review.js";
 import type { EdgeEvidence, Graph, NodeKind, NodeRec } from "./types.js";
 import { ensureState, explainPathCoverage } from "./state.js";
 import type { RepoState } from "./state.js";
@@ -813,10 +813,14 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       .map((entry) => `\n! ${entry.path ?? entry.requested}: ${entry.reason}.`)
       .join("");
     const text = `fovea impact: no seed files (repo clean or paths unknown). Pass files: [...] or symbols: [...] for a what-if cascade.${gaps}`;
+    const session = getSession(root);
+    if (session.reviewMemory) updateReviewMemory(session, [], new Map());
+    const review = reviewReport(session.reviewMemory);
+    const fit = revealGroups([], { header: text, budget: B, trailer: reviewTrailer(review) });
     return {
-      text,
-      tokens: tokenEstimate(text),
-      details: { seeds: 0, requestedCoverage, ...extractionDetails(state) },
+      text: fit.text,
+      tokens: fit.tokens,
+      details: { seeds: 0, requestedCoverage, ...extractionDetails(state), review },
     };
   }
   const seeds = [...seedSet];
@@ -1000,16 +1004,18 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
     for (const [k, v] of warmed.slice(0, 2000)) warmedNodes[k] = v;
   }
 
-  // Obligation ledger: merge this cascade's residual mass additively. Unlike
-  // novelty heat, entries persist until evidence transitions them (read/edit/
-  // verify) or the epoch resets — the conservation half of the
-  // salience/obligation split.
-  const foveaSession = getSession(root);
-  const epochDecision = ensureEpoch(foveaSession, seedFiles);
-  if (companionResiduals.size) mergeWarmed(foveaSession, companionResiduals, "unmet co-change companion");
-  if (fileAgg.size) mergeWarmed(foveaSession, fileAgg, "diffusion residual");
-  const obligations = residual(foveaSession);
-  const epochTotals = epochStats(foveaSession);
+  // Current salience ranks; hysteretic exposure survives cooling. Repeating
+  // this cascade cannot manufacture more work or certify its completion.
+  const samples = new Map<string, ReviewSample>();
+  for (const file of new Set([...fileAgg.keys(), ...companionResiduals.keys()])) {
+    samples.set(file, {
+      salience: Math.max(fileAgg.get(file) ?? 0, companionResiduals.get(file) ?? 0),
+      reasons: [...(reasonByFile.get(file) ?? []),
+        ...(companionResiduals.has(file) ? ["unmet co-change companion"] : [])],
+      revision: state.facts[file]?.sha1 ?? state.store.failedSha?.get(file),
+    });
+  }
+  const review = reviewReport(updateReviewMemory(getSession(root), seedFiles, samples));
 
   const fileEntries = [...fileAgg.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const fileGroups: GroupLine[] = [];
@@ -1026,16 +1032,12 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       detail: `via ${reasons.join(", ")}${top ? ` · top: ${top}` : ""}`,
     });
   }
-  const groups: GroupLine[] = [...anchorHits, ...fileGroups];
+  // Retained cold suggestions remain reachable in the full overflow artifact.
+  const remembered = review.entries.filter((entry) => entry.status !== "seen" && !fileAgg.has(entry.file))
+    .map((entry) => ({ label: entry.file, mass: entry.salience, detail: `review memory: ${entry.status}` }));
+  const groups: GroupLine[] = [...anchorHits, ...fileGroups, ...remembered];
   const seedNames = seeds.slice(0, 5).map((i) => g.nodes[i]!.file).join(", ");
-  // The model reads rendered text, not details, so the one number that says
-  // whether the change is still closing out has to reach the result itself.
-  // Counts and file names only: the ledger is evidence, never a verdict on the
-  // hypothesis being pursued.
-  const trailer = epochTotals.unresolved > 0
-    ? `obligations · ${epochTotals.unresolved} of ${epochTotals.total} unresolved · ` +
-      `${obligations.slice(0, 3).map((entry) => entry.file).join(", ")}${epochTotals.unresolved > 3 ? ", …" : ""}`
-    : "";
+  const trailer = reviewTrailer(review);
   const fit = revealGroups(groups, {
     header: `fovea impact · changed: ${seedNames}${seeds.length > 5 ? ", …" : ""} · likely review order${extractionSuffix(state)}`,
     budget: B,
@@ -1048,7 +1050,7 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
     details: {
       seeds: seeds.length,
       historyPartners,
-      warmed: groups.length,
+      warmed: anchorHits.length + fileGroups.length,
       truncated: fit.truncated,
       requestedCoverage,
       ...extractionDetails(state),
@@ -1084,10 +1086,8 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
           .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
           .map(([file, mass]) => [file, Number(mass.toFixed(6))]),
       ),
-      // Persistent obligation checklist: survives disclosure and wall-clock
-      // time; cleared only by evidence transitions or an epoch reset.
-      obligations: obligations.slice(0, 10),
-      epoch: epochDecision.rotated ? { ...epochTotals, rotated: true, previous: epochDecision.previous } : epochTotals,
+      // Bounded exposure history, not a completion or verification ledger.
+      review,
     },
   };
 };

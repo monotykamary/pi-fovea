@@ -117,17 +117,17 @@ The raw field $v(t) = e^{-tL}s$ answers a proximity question. On the symmetric n
 
 `impact` reports per-file conserved mass as `conservedMass`, next to `warmedMass`, with seeds excluded. Sync gates stay on the calibrated raw scale. The two scales never mix.
 
-## Obligations: the conservative half
+## Review memory: hysteresis, not conservation
 
-Heat answers *what is interesting now*, and its decay is a feature. A prior that never forgets saturates into uniform warmth and stops guiding anything. Completeness runs on a different invariant. A session that renders, discloses, or times out its unfinished work has lost the ledger. So the same graph carries a second field:
+Heat answers *what is relevant now*. A separate, bounded state records *which source windows were exposed*. Its physics mirror is a resettable thermal-history indicator: a marker can remain after the temperature falls. This is hysteretic memory, not a second diffusion operator and not conserved unfinished work.
 
-- **Additive.** Every `impact` cascade merges its per-file residual mass into the session's obligation epoch through `mergeWarmed` with the `diffusion residual` reason. Entries survive disclosure, rendering, and wall-clock time. Mass leaves `unresolved` only through named evidence transitions: a successful read after the entry's generation marks it `inspected`, a semantic edit marks it `changed` and bumps the generation so later reads can re-mark it, verification marks it `verified`. Nothing else deletes anything.
-- **Bounded.** The ledger caps at 512 files and evicts the weakest mass first, with path order breaking ties. Resets happen at an explicit epoch reset or through `resetSessions()`.
-- **Surfaced in `impact` details** as `obligations` (strongest unresolved first, with reasons and generations) and `epoch` totals, and in the rendered text as a one-line trailer carrying the unresolved count and its strongest files. The checklist lives in the environment. A model that saw a file still owes the work the ledger records.
-- **Host wiring.** The host's tool-end hooks drive `markRead` on a successful read and `markEdited` on a landed edit or write. `markVerified` stays exported for callers that own a real verification signal. Entries whose transitions never arrive collect as `unresolved`; an unproven obligation stays one, and that is the safe default.
-- **Epoch rotation.** The epoch retains its seed baseline, and `ensureEpoch` opens a new one when the incoming cascade shares no seed with the active epoch. A growing uncommitted diff retains every earlier seed and never rotates; a diff sharing nothing is the structural signal that the previous change is no longer in flight. Rotation discards the old ledger and reports its totals as `epoch.previous`.
+- **Independent dimensions.** Each retained file has current salience and an `unseen`, `seen`, or `stale` marker. Every cascade replaces the salience sample (the maximum of current structural warmth and companion evidence), never adds invocation-count debt. Files absent from a cascade cool to zero without losing the marker. Current heat ranks pending suggestions; repetition is not urgency.
+- **Exposure, not verification.** A successful matching local read records the actual returned line window and content SHA-1. Adjacent windows merge; at most 16 are retained, with `windowsOmitted` marking overflow. Requested limits, failed reads, summaries, and diagnostic-only results cannot imply inspection. Before/after snapshots must match and are capped at 1 MiB per retained file. Reads before admission are unobserved. No `verified` transition exists.
+- **Hysteresis.** A content change makes prior exposure stale. A revert keeps that marker until another matching read. Hash reconciliation runs on graph refresh, including semantic-silent edits and non-tool mutation paths. It does not alter the separate surprise ledger or the warmth latch in turn sync.
+- **Honest bounds.** The strongest 512 files are retained. `evicted` counts actual retained-entry loss, while `omitted` counts unretained new candidates in the latest cascade. A disjoint change rotates the epoch, clears its memory, and retains the previous totals for disclosure. Session/reset/reload clears memory explicitly; there is no durable obligation or completeness invariant.
+- **Progressive disclosure.** `impact.details.review` carries the retained entries, exposure windows, counts, and retention information. The budgeted trailer reports unread/stale/seen counts and loss when it fits. Rendering and cooling never count as reads. Cold pending suggestions join the full overflow list, and even a seedless impact can report existing review memory.
 
-The design rule in one line: heat decays because attention must rank. The ledger holds because completeness needs conservation. Mass leaves through evidence alone, the way a double-entry ledger closes. The two fields are dual.
+The core state transitions live in `src/core/review.ts`; conservative local source matching lives in `src/core/review-read.ts`. Neither executes checks, gates completion, nor independently triggers agent turns. A seen window is not proof of whole-file inspection, understanding, or business-requirement coverage.
 
 ## Unmet-companion residuals: heat for absence
 
@@ -137,7 +137,7 @@ Co-change history says which files usually move together. A latent-coupling bug 
 - For changed file $i$ and unchanged partner $j$, the conditional $q(j \mid i)$ uses the **Wilson score lower bound** (95%) on $n_{ij}/n_i$. Gates: lift (the conditional must beat the base rate $n_j/N$ by a margin), a support floor ($n_{ij} \ge 3$), and the same $2^{-\text{ageDays}/\tau}$ recency as pair conductance. Weight caps at 1.
 - Let $h_{ij}$ be the recency-decayed, lift-discounted lower bound: $q(j|i) \cdot (1 - 1/\mathrm{lift}_{ij}) \cdot 2^{-\mathrm{ageDays}/\tau}$ after the gates above. The implementation adds evidence: $r_j = (1 - x_j)\min(1, \sum_{i : x_i = 1} h_{ij})$. This is a capped evidence score, not an independent-event probability. Fixed source iteration and output ranking keep it deterministic: weight first, path second.
 
-`impact` details surface residuals as `expectedButUnchanged`, strongest first, capped at 12. They merge into the obligation ledger under `unmet co-change companion`. Residuals cool as history ages. The signal disappears the moment the companion joins the diff.
+`impact` details surface residuals as `expectedButUnchanged`, strongest first, capped at 12. They suggest review-memory entries with the `unmet co-change companion` reason; they never establish mandatory work. Residuals cool as history ages. The signal disappears the moment the companion joins the diff.
 
 ## Inferred regions (basins)
 

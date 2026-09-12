@@ -14,7 +14,8 @@ import { hasAstGrep } from "./core/astgrep.js";
 import { ROOT_CACHE_LIMIT } from "./core/asyncutil.js";
 import { coverageSummary, dwell, ensureStateBackground, focus, impact, sketch } from "./core/ops.js";
 import { getSession, observeSessionPaths, resetSessions } from "./core/session.js";
-import { markEdited, markRead } from "./core/obligations.js";
+import { observeReviewRevision } from "./core/review.js";
+import { captureReviewRead, finishReviewRead } from "./core/review-read.js";
 import { captureMutation, finishMutation, type MutationCapture } from "./core/provenance.js";
 import { resetSyncBaselines, sync, syncBaselineStore, warmSync } from "./core/sync.js";
 import type { NodeKind } from "./core/types.js";
@@ -303,10 +304,9 @@ export default function fovea(pi: ExtensionAPI) {
   const WARM_DEBOUNCE_MS = 250;
   const warmTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingMutations = new Map<string, MutationCapture>();
-  // A read closes an obligation only once it succeeds, so the target is held
-  // from tool_execution_start (which carries args) to tool_execution_end
-  // (which carries only the result).
-  const pendingReads = new Map<string, { root: string; path: string }>();
+  // Capture a bounded source snapshot; only matching successful returned
+  // windows become exposure. Reads are not verification or completion.
+  const pendingReads = new Map<string, NonNullable<Awaited<ReturnType<typeof captureReviewRead>>>>();
   const warmAfterEdit = (root: string, cfg: FoveaConfig): void => {
     const rels = turnFiles
       .map((p) => (p.startsWith(root + "/") ? p.slice(root.length + 1) : p))
@@ -336,12 +336,16 @@ export default function fovea(pi: ExtensionAPI) {
     turnFiles = [];
   });
   pi.on("tool_execution_start", async (event, ctx) => {
-    const args = event.args as { path?: unknown };
+    const args = event.args as { path?: unknown; offset?: unknown; limit?: unknown };
     if (ATTENTION_PATH_TOOLS.has(event.toolName) && typeof args.path === "string") {
       const owner = roots.owner(ctx.cwd, args.path);
       if (owner) {
         observeSessionPaths(owner.root, [owner.path]);
-        if (event.toolName === "read") pendingReads.set(event.toolCallId, owner);
+        if (event.toolName === "read") {
+          const epoch = lifecycleEpoch;
+          const capture = await captureReviewRead(getSession(owner.root).reviewMemory, owner.root, owner.path, args);
+          if (capture && epoch === lifecycleEpoch) pendingReads.set(event.toolCallId, capture);
+        }
       }
     }
     if (event.toolName !== "edit" && event.toolName !== "write") return;
@@ -358,16 +362,19 @@ export default function fovea(pi: ExtensionAPI) {
     const read = pendingReads.get(event.toolCallId);
     if (read) {
       pendingReads.delete(event.toolCallId);
-      // A failed read revealed nothing, so it cannot close an obligation.
-      if (!event.isError) markRead(getSession(read.root), [read.path]);
+      if (!event.isError) await finishReviewRead(read, event.result);
     }
     if (event.toolName !== "edit" && event.toolName !== "write") return;
     const capture = pendingMutations.get(event.toolCallId);
     pendingMutations.delete(event.toolCallId);
     if (!event.isError && capture) {
-      // A landed write is a new file generation: the obligation returns to the
-      // checklist until a later successful read inspects that generation.
-      markEdited(getSession(capture.root), [capture.file]);
+      // No-op writes preserve exposure. Other paths are reconciled against
+      // content hashes on refresh, independently of semantic turn steering.
+      const memory = getSession(capture.root).reviewMemory;
+      if (memory?.entries.has(capture.file)) {
+        const after = await captureMutation(capture.root, capture.file);
+        if (capture.beforeSha !== after?.beforeSha) observeReviewRevision(memory, capture.file, after?.beforeSha);
+      }
       await finishMutation(capture, ctx.sessionManager.getSessionId(), event.toolCallId).catch(() => false);
     }
     if (capture) warmAfterEdit(capture.root, targetConfig(capture.root, ctx));
@@ -531,7 +538,7 @@ export default function fovea(pi: ExtensionAPI) {
     name: "fovea_impact",
     label: "Fovea Impact",
     description:
-      "Predict review order from changed files, symbols, or a PR base. Returns warmed files with causal channels, deterministic edge evidence paths, explicit input coverage gaps, co-change history, and obligations.",
+      "Predict review order from changed files, symbols, or a PR base. Returns warmed files with causal channels, deterministic edge evidence paths, explicit input coverage gaps, co-change history, and advisory unread/stale review memory (not completion evidence).",
     promptSnippet: "Predict the likely review surface of a change",
     promptGuidelines: ["Use fovea_impact before broad or risky edits and when checking the blast radius of completed changes."],
     parameters: Type.Object({
@@ -590,7 +597,7 @@ export default function fovea(pi: ExtensionAPI) {
         turnFiles = [];
         resetSessions();
         resetSyncBaselines();
-        ctx.ui.notify("Fovea focus history and sync baseline reset.", "info");
+        ctx.ui.notify("Fovea focus history, review memory, and sync baseline cleared.", "info");
         return;
       }
       if (sub === "settings") {
