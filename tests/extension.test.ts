@@ -12,7 +12,7 @@ import { canonicalPath } from "../src/core/roots.js";
 import { captureMutation, finishMutation, provenancePathFor } from "../src/core/provenance.js";
 import { hasAstGrep } from "../src/core/astgrep.js";
 import { cachePathFor } from "../src/core/build.js";
-import { ensureState, evictState, getInflight, getState } from "../src/core/ops.js";
+import { evictState, getInflight, getState } from "../src/core/ops.js";
 import { DEFAULT_FOVEA_CONFIG } from "../src/core/config.js";
 import { resetSyncBaselines, syncBaselineStore, warmCacheHas } from "../src/core/sync.js";
 
@@ -85,12 +85,15 @@ const load = () => {
     ctx: ReturnType<typeof fakeCtx>,
   ): Promise<unknown[]> => {
     const results: unknown[] = [];
-    for (const handler of handlers.get(name) ?? []) results.push(await handler(event, ctx));
+    for (const handler of handlers.get(name) ?? []) { const result = await handler(event, ctx); if (result !== undefined) results.push(result); }
     return results;
   };
   return { tools, commands, messages, emit, execCalls };
 };
 
+
+const enter = (loaded: ReturnType<typeof load>, ctx: ReturnType<typeof fakeCtx>) =>
+  loaded.tools.get("fovea_sketch")!.execute("enter", { root: ctx.cwd, maxTokens: 256 }, new AbortController().signal, undefined, ctx);
 
 const enableGrep = async () => {
   const root = mkdtempSync(path.join(tmpdir(), "pi-fovea-grep-"));
@@ -212,33 +215,32 @@ describe("extension entry", () => {
     }
   });
 
-  it("read events establish path attention without inspecting or retaining read results", async () => {
-    resetSessions();
-    const loaded = load();
-    const ctx = fakeCtx(FIXTURE);
+  it.skipIf(!hasAstGrep())("successful reads establish attention without inspecting results; failed reads do not", async () => {
+    resetSessions(); const loaded=load(), ctx=fakeCtx(FIXTURE);
     try {
-      const args = { path: path.join(FIXTURE, "web/api.ts"), offset: 2, limit: 2 };
-      const session = getSession(canonicalPath(FIXTURE));
-      const result = { get content(): never { throw new Error("read results must remain opaque"); } };
-      for (const isError of [false, true]) {
-        await loaded.emit("tool_execution_start", { toolCallId: "read", toolName: "read", args }, ctx);
-        expect([...session.syncScopes]).toEqual(["web"]);
-        const before = structuredClone(session);
-        await loaded.emit("tool_execution_end", { toolCallId: "read", toolName: "read", result, isError }, ctx);
-        expect(session).toEqual(before);
-      }
-      expect(session).not.toHaveProperty("reviewMemory");
-      expect(loaded.messages).toEqual([]);
-    } finally {
-      await loaded.emit("session_shutdown", {}, ctx);
-    }
+      await enter(loaded,ctx);
+      const args={path:path.join(FIXTURE,"web/api.ts"),offset:2,limit:2};
+      const session=getSession(canonicalPath(FIXTURE));
+      await loaded.emit("tool_execution_start",{toolCallId:"read",toolName:"read",args},ctx);
+      expect([...session.syncScopes]).toEqual([]);
+      const event={toolCallId:"read",toolName:"read",input:args,isError:false,get content():never {throw new Error("read results must remain opaque");}};
+      await loaded.emit("tool_result",event,ctx);
+      expect([...session.syncScopes]).toEqual(["web"]);
+      const before=structuredClone(session);
+      await loaded.emit("tool_execution_start",{toolCallId:"denied",toolName:"read",args:{path:path.join(FIXTURE,"server/main.go")}},ctx);
+      await loaded.emit("tool_result",{toolCallId:"denied",toolName:"read",input:{path:path.join(FIXTURE,"server/main.go")},isError:true},ctx);
+      expect(session).toEqual(before); expect(session).not.toHaveProperty("reviewMemory"); expect(loaded.messages).toEqual([]);
+    } finally { await loaded.emit("session_shutdown",{},ctx); }
   });
+
 });
 
 describe.skipIf(!hasAstGrep())("extension execution", () => {
   it("reports loaded versions, index coverage, anchor scopes, and active modes", async () => {
-    const { commands } = load();
+    const loaded = load();
+    const { commands } = loaded;
     const ctx = fakeCtx(FIXTURE);
+    await enter(loaded, ctx);
     const notify = vi.fn();
     ctx.ui.notify = notify;
     await commands.get("fovea")!.handler("status", ctx);
@@ -348,6 +350,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
   it("co-existence: native grep results gain a Fovea graph section for symbol queries", async () => {
     resetSessions();
     const loaded = load();
+    await enter(loaded, fakeCtx(FIXTURE));
     const [patch] = await loaded.emit("tool_result", {
       type: "tool_result",
       toolName: "grep",
@@ -458,7 +461,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     const loaded = load();
     const ctx = fakeCtx(root);
     try {
-      await ensureState(root); // session_start pre-warm equivalent
+      await enter(loaded, ctx); // explicit root enrollment without directory attention
       await loaded.emit("before_agent_start", { prompt: "first" }, ctx);
       const main = path.join(root, "server/main.go");
       writeFileSync(
@@ -496,7 +499,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     const loaded = load();
     const ctx = fakeCtx(root);
     try {
-      await ensureState(root);
+      await enter(loaded, ctx);
       await loaded.emit("before_agent_start", { prompt: "first" }, ctx);
       await loaded.emit("turn_start", {}, ctx);
       const main = path.join(root, "server/main.go");
@@ -544,7 +547,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     const loaded = load();
     const ctx = fakeCtx(root);
     try {
-      await ensureState(root);
+      await enter(loaded, ctx);
       await loaded.emit("session_start", { reason: "startup" }, ctx);
       await loaded.emit("before_agent_start", { prompt: "first session" }, ctx);
       const main = path.join(root, "server/main.go");
@@ -578,13 +581,13 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     const loaded = load();
     const ctx = fakeCtx(root);
     try {
-      await ensureState(root); // session_start pre-warm equivalent
+      await enter(loaded, ctx); // explicit root enrollment without directory attention
       await loaded.emit("before_agent_start", { prompt: "change the route" }, ctx); // establish pre-edit baseline
       await loaded.emit("turn_start", {}, ctx);
       const main = path.join(root, "server/main.go");
       await loaded.emit(
-        "tool_execution_start",
-        { toolCallId: "read-1", toolName: "read", args: { path: main } },
+        "tool_result",
+        { toolCallId: "read-1", toolName: "read", input: { path: main }, isError: false },
         ctx,
       );
       writeFileSync(
@@ -618,12 +621,12 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     const ctx = fakeCtx(root, false, "session-a");
     const main = path.join(root, "server/main.go");
     try {
-      await ensureState(root);
+      await enter(loaded, ctx);
       await loaded.emit("before_agent_start", { prompt: "watch server" }, ctx);
       await loaded.emit("turn_start", {}, ctx);
       await loaded.emit(
-        "tool_execution_start",
-        { toolCallId: "read-1", toolName: "read", args: { path: main } },
+        "tool_result",
+        { toolCallId: "read-1", toolName: "read", input: { path: main }, isError: false },
         ctx,
       );
       const capture = await captureMutation(root, main);
@@ -662,13 +665,13 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     const loaded = load();
     const ctx = fakeCtx(root, true);
     try {
-      await ensureState(root);
+      await enter(loaded, ctx);
       await loaded.emit("before_agent_start", { prompt: "change the route" }, ctx);
       await loaded.emit("turn_start", {}, ctx);
       const main = path.join(root, "server/main.go");
       await loaded.emit(
-        "tool_execution_start",
-        { toolCallId: "read-1", toolName: "read", args: { path: main } },
+        "tool_result",
+        { toolCallId: "read-1", toolName: "read", input: { path: main }, isError: false },
         ctx,
       );
       writeFileSync(
@@ -729,7 +732,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     const loaded = load();
     const ctx = fakeCtx(root);
     try {
-      await ensureState(root);
+      await enter(loaded, ctx);
       await loaded.emit("before_agent_start", { prompt: "add a route" }, ctx);
       await loaded.emit("turn_start", {}, ctx);
       const main = path.join(root, "server/main.go");
@@ -774,43 +777,26 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     expect(result.content[0]!.text).toContain("web/api.ts");
   });
 
-  it("kicks a background index at session start without ever blocking the prompt", async () => {
-    const loaded = load();
-    const root = mkdtempSync(path.join(tmpdir(), "pi-fovea-pre-"));
+  it("keeps startup and idle prompts neutral, then enrolls on successful access", async () => {
+    const loaded=load(), root=mkdtempSync(path.join(tmpdir(),"pi-fovea-coordinator-start-")), ctx=fakeCtx(root,true);
     try {
-      writeFileSync(path.join(root, "probe.ts"), "export const probe = 1;\n");
-      evictState(root);
-      // session_start returns promptly and the build runs out-of-band.
-      await loaded.emit("session_start", { reason: "new" }, fakeCtx(root, true));
-      const pending = getInflight(root);
-      expect(pending).toBeDefined();
-      const state = await pending!;
-      expect(getState(root)?.version).toBe(state.version);
-      // The fact cache materializes for the next session's warm start.
-      expect(existsSync(cachePathFor(root))).toBe(true);
-      // ast-grep missing: the gate short-circuits before kicking anything.
-      const other = mkdtempSync(path.join(tmpdir(), "pi-fovea-pre-missing-"));
-      try {
-        vi.stubEnv("FOVEA_AST_GREP", "/fovea-test/nonexistent-sg");
-        await loaded.emit("session_start", { reason: "new" }, fakeCtx(other, true));
-        // Availability is probed asynchronously too: session start still
-        // returns first, then the background build rejects without state.
-        const unavailable = getInflight(other);
-        expect(unavailable).toBeDefined();
-        await expect(unavailable).rejects.toThrow(/ast-grep/);
-        expect(getInflight(other)).toBeUndefined();
-        expect(getState(other)).toBeUndefined();
-      } finally {
-        vi.unstubAllEnvs();
-        rmSync(other, { recursive: true, force: true });
-      }
+      writeFileSync(path.join(root,"probe.ts"),"export const probe = 1;\n"); evictState(root);
+      await loaded.emit("session_start",{reason:"new"},ctx);
+      await loaded.emit("before_agent_start",{prompt:"hello"},ctx);
+      await loaded.emit("turn_end",{},ctx);
+      expect(getInflight(root)).toBeUndefined(); expect(getState(root)).toBeUndefined();
+      expect(existsSync(cachePathFor(root))).toBe(false);
+      const event={toolName:"read",toolCallId:"read",input:{path:path.join(root,"probe.ts")},isError:false};
+      await loaded.emit("tool_result",{...event,isError:true},ctx); expect(getState(root)).toBeUndefined();
+      await loaded.emit("tool_result",event,ctx);
+      expect(getState(root)).toBeDefined(); expect(syncBaselineStore().has(root)).toBe(true);
+      expect(loaded.messages).toHaveLength(0);
     } finally {
-      vi.unstubAllEnvs();
-      evictState(root);
-      rmSync(root, { recursive: true, force: true });
-      rmSync(cachePathFor(root), { force: true });
+      await loaded.emit("session_shutdown",{},ctx); evictState(root);
+      rmSync(root,{recursive:true,force:true}); rmSync(cachePathFor(root),{force:true});
     }
   });
+
 });
 
 describe.skipIf(!hasAstGrep())("explicit multi-root continuity", () => {
@@ -918,8 +904,9 @@ describe.skipIf(!hasAstGrep())("explicit multi-root continuity", () => {
       expect(loaded.messages.reduce((n, m) => n + Math.ceil(String(m.message.content).length / 4), 0)).toBeLessThanOrEqual(1024);
       expect(getState(outside)).toBeUndefined();
       expect(syncBaselineStore().has(outside)).toBe(false);
-      await expect(loaded.tools.get("fovea_sketch")!.execute("overflow", { root: "unobserved" }, signal, undefined, ctx)).rejects.toThrow("observed-root limit");
-      expect(getState(outside)).toBeUndefined();
+      const additional = await loaded.tools.get("fovea_sketch")!.execute("additional", { root: "unobserved" }, signal, undefined, ctx);
+      expect(additional.details.observedRoots).toEqual([a, b, outside].sort());
+      expect(additional.details.workspace).toMatchObject({ capacity: 32 });
       await loaded.emit("turn_end", {}, ctx);
       expect(loaded.messages).toHaveLength(2);
     } finally {

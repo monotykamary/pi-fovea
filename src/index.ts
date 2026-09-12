@@ -6,13 +6,13 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { canonicalPath, ExecutionRoots } from "./core/roots.js";
-import { ensureState } from "./core/state.js";
+import { canonicalPath, ExecutionRoots, ProjectDiscovery, accessedPaths, WORKSPACE_ACCESS_EVENT, peerWorkspaceRoot, latestWorkspaceEntry } from "./core/roots.js";
+import { ensureState, evictState } from "./core/state.js";
 import { resolveAgentDir } from "./core/agent-dir.js";
 import { loadFoveaConfig, type FoveaConfig } from "./core/config.js";
 import { hasAstGrep } from "./core/astgrep.js";
-import { ROOT_CACHE_LIMIT } from "./core/asyncutil.js";
-import { coverageSummary, dwell, ensureStateBackground, focus, impact, sketch } from "./core/ops.js";
+import { OBSERVED_ROOT_LIMIT } from "./core/asyncutil.js";
+import { coverageSummary, dwell, focus, impact, sketch } from "./core/ops.js";
 import { observeSessionPaths, resetSessions } from "./core/session.js";
 import { captureMutation, finishMutation, type MutationCapture } from "./core/provenance.js";
 import { resetSyncBaselines, sync, syncBaselineStore, warmSync } from "./core/sync.js";
@@ -73,7 +73,6 @@ const requestsNativeGrep = (params: {
 const text = (s: string) => ({ type: "text" as const, text: s });
 const syncRuns = (config: FoveaConfig): boolean => config.sync.mode !== "disabled";
 const syncDisplays = (config: FoveaConfig): boolean => config.sync.mode === "enabled";
-const ATTENTION_PATH_TOOLS = new Set(["read", "edit", "write", "grep", "find", "ls"]);
 
 const NODE_KINDS = new Set<NodeKind>([
   "function", "method", "class", "interface", "type", "field", "decl", "file", "anchor",
@@ -83,6 +82,14 @@ const focusKind = (value: string | undefined): NodeKind | undefined =>
 
 export default function fovea(pi: ExtensionAPI) {
   const roots = new ExecutionRoots();
+  const discovery = new ProjectDiscovery();
+  let unsubscribe: (() => void) | undefined;
+  let savedRevision = -1;
+  let retiredSinceNotice = 0;
+  const persistRoots = (force = false): void => {
+    if (!force && savedRevision === roots.revision) return;
+    pi.appendEntry?.("pi-fovea-workspace", roots.snapshot()); savedRevision = roots.revision;
+  };
   const targetConfig = (root: string, ctx: ExtensionContext): FoveaConfig =>
     configFor(root, canonicalPath(ctx.cwd) === root && ctx.isProjectTrusted());
   // Per-root config cache; invalidated by settings saves (/fovea settings).
@@ -97,26 +104,43 @@ export default function fovea(pi: ExtensionAPI) {
     }
     const cfg = loadFoveaConfig({ cwd: root, agentDir: agentDir ?? resolveAgentDir(), projectTrusted: trusted });
     configs.set(key, cfg);
-    while (configs.size > ROOT_CACHE_LIMIT) configs.delete(configs.keys().next().value!);
+    while (configs.size > OBSERVED_ROOT_LIMIT) configs.delete(configs.keys().next().value!);
     return cfg;
   };
 
-  // Serialize enrollment in invocation order, including parallel graph calls.
+  // Serialize successful enrollment; failed or replaced sessions cannot bind late.
   let bindingTail: Promise<unknown> = Promise.resolve();
-  const bindRoot = (root: string, ctx: ExtensionContext): Promise<void> => {
+  const chooseRoot = async (ctx: ExtensionContext, input?: string): Promise<string> => {
+    const epoch = lifecycleEpoch;
+    if (input === undefined) await bindingTail.catch(() => {});
+    if (epoch !== lifecycleEpoch) throw new Error("Fovea session changed during target selection");
+    return roots.target(ctx.cwd, input);
+  };
+  const retireRoot = (root: string): void => {
+    clearTimeout(warmTimers.get(root)); warmTimers.delete(root);
+    resetSessions(root); resetSyncBaselines(root); evictState(root);
+    for (const [id, capture] of pendingMutations) if (capture.root === root) pendingMutations.delete(id);
+    retiredSinceNotice++;
+  };
+  const bindRoot = (root: string, ctx: ExtensionContext, peer = false): Promise<void> => {
     const epoch = lifecycleEpoch;
     const pending = bindingTail.catch(() => {}).then(async () => {
       if (epoch !== lifecycleEpoch) throw new Error("Fovea session changed during root binding");
-      roots.check(root);
+      const change = roots.bind(root);
+      if (change.evicted) retireRoot(change.evicted);
+      if (change.fresh) { resetSessions(root); resetSyncBaselines(root); }
+      persistRoots();
+      const lease = roots.lease(root);
+      const current = () => epoch === lifecycleEpoch && roots.lease(root) === lease;
+      if (!peer) pi.events?.emit(WORKSPACE_ACCESS_EVENT, { version: 1, source: "fovea", root, sessionId: ctx.sessionManager.getSessionId() });
       const cfg = targetConfig(root, ctx);
       if (syncRuns(cfg) && !syncBaselineStore().has(root)) {
         const state = await ensureState(root);
-        if (epoch !== lifecycleEpoch) throw new Error("Fovea session changed during root binding");
+        if (!current()) throw new Error("Fovea workspace changed during indexing");
         await sync(root, { files: [], budget: cfg.sync.budget, steerThreshold: cfg.sync.steerThreshold, scope: cfg.sync.scope,
-          sessionId: ctx.sessionManager.getSessionId() }, state);
+          sessionId: ctx.sessionManager.getSessionId() }, state, { current });
       }
-      if (epoch !== lifecycleEpoch) throw new Error("Fovea session changed during root binding");
-      roots.bind(root);
+      if (!current()) throw new Error("Fovea workspace changed during indexing");
     });
     bindingTail = pending;
     return pending;
@@ -144,6 +168,25 @@ export default function fovea(pi: ExtensionAPI) {
 
   let lifecycleEpoch = 0;
   let grepOverrideRegistered = false;
+
+  // Enrollment follows completed access, never preflight/permission-gate intent.
+  pi.on("tool_result", async (event, ctx) => {
+    if (event.isError) return;
+    for (const path of accessedPaths(event.toolName, event.input, ctx.cwd)) {
+      const epoch = lifecycleEpoch;
+      const project = await discovery.discover(ctx.cwd, path);
+      if (!project || epoch !== lifecycleEpoch) continue;
+      const owner = roots.owner(ctx.cwd, path);
+      const root = owner && owner.root.length > project.root.length ? owner.root : project.root;
+      try {
+        await bindRoot(root, ctx);
+        const entered = roots.owner(ctx.cwd, path);
+        if (entered) observeSessionPaths(entered.root, [entered.path || "."]);
+      } catch (error) {
+        if (ctx.hasUI) ctx.ui.notify(`fovea: workspace analysis unavailable: ${error instanceof Error ? error.message : error}`, "warning");
+      }
+    }
+  });
 
   // Augment mode (default): native grep keeps core semantics in every host
   // (pi's model-facing loop AND pi.grep inside fabric_exec, which re-emits
@@ -239,55 +282,26 @@ export default function fovea(pi: ExtensionAPI) {
     });
   };
 
+  const restoreRoots = (ctx: ExtensionContext): void => {
+    lifecycleEpoch++; bindingTail = Promise.resolve(); discovery.clear();
+    for (const timer of warmTimers.values()) clearTimeout(timer);
+    warmTimers.clear(); pendingMutations.clear(); turnFiles = [];
+    roots.restore(latestWorkspaceEntry(ctx.sessionManager.getBranch?.() ?? [], "pi-fovea-workspace"));
+    savedRevision = roots.revision; retiredSinceNotice = 0;
+    resetSessions(); resetSyncBaselines();
+  };
   pi.on("session_start", async (_event, ctx) => {
-    const epoch = ++lifecycleEpoch;
-    const sessionId = ctx.sessionManager.getSessionId();
-    // pi 0.84 replaces extension runtimes on resume/fork/new/reload. Core
-    // module caches may outlive one factory instance, but disclosure and sync
-    // baselines are session-local and must never cross that boundary.
-    roots.clear();
-    resetSessions();
-    resetSyncBaselines();
+    restoreRoots(ctx);
+    unsubscribe?.();
+    unsubscribe = pi.events?.on(WORKSPACE_ACCESS_EVENT, data => {
+      const root = peerWorkspaceRoot(data, ctx.sessionManager.getSessionId(), "fovea");
+      if (root) void bindRoot(canonicalPath(ctx.cwd, root), ctx, true).catch(() => {});
+    });
     if (configFor(ctx.cwd, ctx.isProjectTrusted()).tools.grepMode === "replace") registerGrepOverride();
-    // Kick indexing in the background — the very first prompt must never
-    // wait on hashing/ast-grep. Slow cold builds surface a ready notice so
-    // the freeze feels like progress instead of a hang.
-    try {
-      const startupRoot = canonicalPath(ctx.cwd);
-      const kick = ensureStateBackground(startupRoot);
-      const t0 = Date.now();
-      // Always attach a rejection handler; headless sessions must not leak an
-      // unhandled rejection when ast-grep is unavailable.
-      void kick.promise.then(
-        (st) => {
-          if (epoch !== lifecycleEpoch) return;
-          const ms = Date.now() - t0;
-          if (kick.started && ctx.hasUI && ms > 4000) {
-            ctx.ui.notify(`fovea: index ready — ${st.graph.files.length} files (${(ms / 1000).toFixed(1)}s)`, "info");
-          }
-          // Pre-establish the sync baseline in the background so the very
-          // first prompt fast-paths instead of paying the snapshot on the
-          // send path. A /new, /fork, or reload bumps the epoch and clears it.
-          const pre = targetConfig(startupRoot, ctx);
-          if (!roots.list(ctx.cwd).includes(startupRoot) || !syncRuns(pre) || syncBaselineStore().has(startupRoot)) return;
-          void sync(
-            startupRoot,
-            { files: [], budget: pre.sync.budget, steerThreshold: pre.sync.steerThreshold, pushFocus: pre.sync.pushFocus, scope: pre.sync.scope, sessionId },
-            st,
-            { probe: "full" },
-          ).catch(() => {});
-        },
-        (error) => {
-          if (epoch !== lifecycleEpoch) return;
-          if (kick.started && ctx.hasUI) {
-            ctx.ui.notify(`fovea: index failed: ${error instanceof Error ? error.message : error}`, "warning");
-          }
-        },
-      );
-    } catch {
-      // Pre-warm is strictly best-effort; the first tool call retries inline.
-    }
+    // The launch directory is a coordinator, not an implicit scan request.
   });
+  pi.on("session_tree", (_event, ctx) => restoreRoots(ctx));
+  pi.on("session_compact", () => persistRoots(true));
 
   // Turn-sync loop. Tool events provide optional file hints, but content and
   // extracted-fact drift remain the source of truth. The same path therefore
@@ -316,6 +330,7 @@ export default function fovea(pi: ExtensionAPI) {
     }, WARM_DEBOUNCE_MS));
   };
   pi.on("session_shutdown", () => {
+    unsubscribe?.(); unsubscribe = undefined; discovery.clear();
     for (const timer of warmTimers.values()) clearTimeout(timer);
     warmTimers.clear();
     pendingMutations.clear();
@@ -331,10 +346,6 @@ export default function fovea(pi: ExtensionAPI) {
   });
   pi.on("tool_execution_start", async (event, ctx) => {
     const args = event.args as { path?: unknown };
-    if (ATTENTION_PATH_TOOLS.has(event.toolName) && typeof args.path === "string") {
-      const owner = roots.owner(ctx.cwd, args.path);
-      if (owner) observeSessionPaths(owner.root, [owner.path]);
-    }
     if (event.toolName !== "edit" && event.toolName !== "write") return;
     if (typeof args.path !== "string") return;
     const owner = roots.owner(ctx.cwd, args.path);
@@ -350,35 +361,43 @@ export default function fovea(pi: ExtensionAPI) {
     const capture = pendingMutations.get(event.toolCallId);
     pendingMutations.delete(event.toolCallId);
     if (!event.isError && capture) {
+      observeSessionPaths(capture.root, [capture.file]);
       await finishMutation(capture, ctx.sessionManager.getSessionId(), event.toolCallId).catch(() => false);
     }
     if (capture) warmAfterEdit(capture.root, targetConfig(capture.root, ctx));
   });
-  // One session-level context allowance, shared across only explicit roots.
-  const pollRoots = async (ctx: ExtensionContext, probe: "cheap" | "defer", files: string[]) => {
-    const targets = roots.list(ctx.cwd);
-    const allowance = configFor(canonicalPath(ctx.cwd), ctx.isProjectTrusted()).sync.budget;
-    const share = Math.floor(allowance / targets.length);
+  // Clean roots spend no context. Rotate after budget exhaustion instead of
+  // dividing one meaningful update into 32 tiny per-root allowances.
+  let pollCursor = 0;
+  const pollRoots = async (ctx: ExtensionContext, probe: "cheap" | "defer", files: string[], reserve = 0) => {
+    const targets = roots.list();
+    const epoch = lifecycleEpoch;
+    let remaining = Math.max(0, configFor(canonicalPath(ctx.cwd), ctx.isProjectTrusted()).sync.budget - reserve);
     const notices: Array<{ content: string; display: boolean; details: Record<string, unknown>; nextPrompt: boolean }> = [];
-    for (const root of targets) {
+    const start = targets.length ? pollCursor % targets.length : 0;
+    for (let i = 0; i < targets.length; i++) {
+      if (remaining < 128 || epoch !== lifecycleEpoch) break;
+      const at = (start + i) % targets.length, root = targets[at]!;
+      pollCursor = (at + 1) % targets.length;
+      const lease = roots.lease(root);
+      const current = () => epoch === lifecycleEpoch && roots.lease(root) === lease;
       try {
         const cfg = targetConfig(root, ctx);
         if (!syncRuns(cfg)) continue;
-        const budget = Math.min(cfg.sync.budget, share);
-        const rels = files.flatMap((file) => {
-          const owner = roots.owner(ctx.cwd, file);
-          return owner?.root === root ? [owner.path] : [];
-        });
+        const label = `Root: ${root}\n`;
+        const budget = Math.min(cfg.sync.budget, remaining) - Math.ceil(label.length / 4) - 1;
+        if (budget < 64) continue;
+        const rels = files.flatMap(file => { const owner = roots.owner(ctx.cwd, file); return owner?.root === root ? [owner.path] : []; });
         const outcome = await sync(root, {
           files: rels, budget, steerThreshold: cfg.sync.steerThreshold,
-          pushFocus: cfg.sync.pushFocus, scope: cfg.sync.scope,
-          sessionId: ctx.sessionManager.getSessionId(),
-        }, undefined, { probe });
+          pushFocus: cfg.sync.pushFocus, scope: cfg.sync.scope, sessionId: ctx.sessionManager.getSessionId(),
+        }, undefined, { probe, current });
+        if (!current()) { if (!roots.has(root)) { resetSessions(root); resetSyncBaselines(root); } continue; }
         lastSyncError = undefined;
         if (outcome.red && outcome.text) {
-          const content = (targets.length > 1 ? `Root: ${root}\n` : "") + outcome.text;
-          notices.push({ content: content.slice(0, budget * 4 - 1) + "\n", display: syncDisplays(cfg),
-            details: { ...outcome.details, root }, nextPrompt: outcome.delivery === "next-prompt" });
+          const content = (label + outcome.text).slice(0, Math.min(cfg.sync.budget, remaining) * 4 - 1) + "\n";
+          remaining -= Math.ceil(content.length / 4);
+          notices.push({ content, display: syncDisplays(cfg), details: { ...outcome.details, root, agentOrigin: ctx.cwd }, nextPrompt: outcome.delivery === "next-prompt" });
         } else if (outcome.structural && !outcome.details.baseline && !outcome.details.deferred &&
           !outcome.details.outsideAttention && cfg.sync.ackClean && ctx.hasUI) {
           ctx.ui.notify(`fovea: checked ${root}; no new action is needed.`, "info");
@@ -392,13 +411,16 @@ export default function fovea(pi: ExtensionAPI) {
     return notices;
   };
   pi.on("before_agent_start", async (_event, ctx) => {
-    const notices = await pollRoots(ctx, "defer", []);
-    if (!notices.length) return;
+    const note = retiredSinceNotice && syncRuns(configFor(ctx.cwd, ctx.isProjectTrusted()))
+      ? `Workspace ring: ${retiredSinceNotice} project retirement(s). Only the ${roots.capacity} most recently used roots remain observed; re-entry starts a fresh baseline, not a clean verdict.\n` : "";
+    const notices = await pollRoots(ctx, "defer", [], Math.ceil(note.length / 4));
+    if (!notices.length && !note) return;
+    retiredSinceNotice = 0;
     return { message: {
       customType: "pi-fovea-sync",
-      content: notices.map((n) => n.content).join(""),
+      content: note + notices.map((n) => n.content).join(""),
       // A combined pre-prompt notice must not expose a hidden target.
-      display: notices.every((n) => n.display),
+      display: notices.length > 0 && notices.every((n) => n.display),
       details: notices.length === 1 ? notices[0]!.details : { roots: notices.map((n) => n.details) },
     } };
   });
@@ -424,13 +446,15 @@ export default function fovea(pi: ExtensionAPI) {
     ],
     parameters: Type.Object({ root: RootParam, maxTokens: BudgetParam }),
     async execute(_id, params, signal, onUpdate, ctx) {
-      const root = roots.target(ctx.cwd, params.root);
+      const root = await chooseRoot(ctx, params.root);
       try {
         if (signal?.aborted) throw new Error("Fovea sketch cancelled");
         await bindRoot(root, ctx);
+        const lease = roots.lease(root), epoch = lifecycleEpoch;
         onUpdate?.({ content: [text("Surveying production architecture…")], details: { phase: "sketch" } });
         const r = await sketch(root, params.maxTokens ?? targetConfig(root, ctx).tools.defaultBudget);
-        return { content: [text(r.text)], details: { ...r.details, root, observedRoots: roots.list(ctx.cwd) } };
+        if (epoch !== lifecycleEpoch || roots.lease(root) !== lease) throw new Error("Fovea root retired during analysis; retry with an explicit root");
+        return { content: [text(r.text)], details: { ...r.details, root, observedRoots: roots.list(), workspace: roots.details(), agentOrigin: ctx.cwd } };
       } catch (error) {
         return rethrowOrDegrade(error);
       }
@@ -460,10 +484,11 @@ export default function fovea(pi: ExtensionAPI) {
       maxTokens: BudgetParam,
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
-      const root = roots.target(ctx.cwd, params.root);
+      const root = await chooseRoot(ctx, params.root);
       try {
         if (signal?.aborted) throw new Error("Fovea focus cancelled");
         await bindRoot(root, ctx);
+        const lease = roots.lease(root), epoch = lifecycleEpoch;
         onUpdate?.({ content: [text("Resolving focused repository context…")], details: { phase: "focus" } });
         const r = await focus(
           root,
@@ -476,7 +501,8 @@ export default function fovea(pi: ExtensionAPI) {
             fresh: params.fresh,
           },
         );
-        return { content: [text(r.text)], details: { ...r.details, root, observedRoots: roots.list(ctx.cwd) } };
+        if (epoch !== lifecycleEpoch || roots.lease(root) !== lease) throw new Error("Fovea root retired during analysis; retry with an explicit root");
+        return { content: [text(r.text)], details: { ...r.details, root, observedRoots: roots.list(), workspace: roots.details(), agentOrigin: ctx.cwd } };
       } catch (error) {
         return rethrowOrDegrade(error);
       }
@@ -496,13 +522,15 @@ export default function fovea(pi: ExtensionAPI) {
       maxTokens: BudgetParam,
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
-      const root = roots.target(ctx.cwd, params.root);
+      const root = await chooseRoot(ctx, params.root);
       try {
         if (signal?.aborted) throw new Error("Fovea dwell cancelled");
         await bindRoot(root, ctx);
+        const lease = roots.lease(root), epoch = lifecycleEpoch;
         onUpdate?.({ content: [text("Widening the current graph context…")], details: { phase: "diffuse" } });
         const r = await dwell(root, params.factor, params.maxTokens ?? targetConfig(root, ctx).tools.defaultBudget);
-        return { content: [text(r.text)], details: { ...r.details, root, observedRoots: roots.list(ctx.cwd) } };
+        if (epoch !== lifecycleEpoch || roots.lease(root) !== lease) throw new Error("Fovea root retired during analysis; retry with an explicit root");
+        return { content: [text(r.text)], details: { ...r.details, root, observedRoots: roots.list(), workspace: roots.details(), agentOrigin: ctx.cwd } };
       } catch (error) {
         return rethrowOrDegrade(error);
       }
@@ -525,10 +553,11 @@ export default function fovea(pi: ExtensionAPI) {
       maxTokens: BudgetParam,
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
-      const root = roots.target(ctx.cwd, params.root);
+      const root = await chooseRoot(ctx, params.root);
       try {
         if (signal?.aborted) throw new Error("Fovea impact cancelled");
         await bindRoot(root, ctx);
+        const lease = roots.lease(root), epoch = lifecycleEpoch;
         onUpdate?.({ content: [text("Tracing likely change impact…")], details: { phase: "impact" } });
         if (params.files?.length) {
           observeSessionPaths(root, params.files);
@@ -540,7 +569,8 @@ export default function fovea(pi: ExtensionAPI) {
           base: params.base,
           budget: params.maxTokens ?? targetConfig(root, ctx).tools.defaultBudget,
         });
-        return { content: [text(r.text)], details: { ...r.details, root, observedRoots: roots.list(ctx.cwd) } };
+        if (epoch !== lifecycleEpoch || roots.lease(root) !== lease) throw new Error("Fovea root retired during analysis; retry with an explicit root");
+        return { content: [text(r.text)], details: { ...r.details, root, observedRoots: roots.list(), workspace: roots.details(), agentOrigin: ctx.cwd } };
       } catch (error) {
         return rethrowOrDegrade(error);
       }
@@ -564,7 +594,7 @@ export default function fovea(pi: ExtensionAPI) {
       }
       if (sub === "reset") {
         lifecycleEpoch++;
-        roots.clear();
+        roots.clear(); discovery.clear(); persistRoots(); retiredSinceNotice = 0;
         for (const timer of warmTimers.values()) clearTimeout(timer);
         warmTimers.clear();
         pendingMutations.clear();
@@ -583,6 +613,10 @@ export default function fovea(pi: ExtensionAPI) {
         }
         return;
       }
+      if (!roots.list().length) {
+        ctx.ui.notify(`pi-fovea ${PACKAGE_VERSION} · coordinator idle · 0/${roots.capacity} roots · no cwd scan; projects enroll after successful access.`, "info");
+        return;
+      }
       try {
         const root = roots.target(ctx.cwd);
         const [state, astGrep] = await Promise.all([
@@ -597,7 +631,7 @@ export default function fovea(pi: ExtensionAPI) {
         const generatedCount = Array.isArray(state.details.extractionGenerated) ? state.details.extractionGenerated.length : 0;
         const cfg = targetConfig(root, ctx);
         ctx.ui.notify(
-          `pi-fovea ${PACKAGE_VERSION} · root ${root} · ${roots.list(ctx.cwd).length} observed · ${coverage} · ${state.details.nodes ?? 0} symbols · ` +
+          `pi-fovea ${PACKAGE_VERSION} · root ${root} · ${roots.list().length}/${roots.capacity} observed · ${roots.details().retirements} retired · ${coverage} · ${state.details.nodes ?? 0} symbols · ` +
           `${state.details.productionAnchors ?? state.details.anchors ?? 0} production anchors` +
           `${Number(state.details.testAnchors ?? 0) ? ` (${state.details.testAnchors} test/fixture collapsed)` : ""}` +
           `${failedCount ? ` · !${failedCount} files failed extraction` : ""}` +
@@ -605,7 +639,7 @@ export default function fovea(pi: ExtensionAPI) {
           `${oversizedCount ? ` · !${oversizedCount} files over size cap` : ""}` +
           `${generatedCount ? ` · !${generatedCount} generated files skipped` : ""} · ` +
           `sync ${cfg.sync.mode}/${cfg.sync.scope} · grep ${cfg.tools.grepMode} · ` +
-          `${astGrep.code === 0 ? astGrep.stdout.trim() : "ast-grep unavailable"}`,
+          `${astGrep.code === 0 ? astGrep.stdout.trim() : "ast-grep unavailable"}\nObserved: ${roots.list().join(", ")}\n${roots.details().continuity}`,
           "info",
         );
       } catch (error) {

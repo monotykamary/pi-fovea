@@ -16,8 +16,10 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { ROOT_CACHE_LIMIT, envInt, forEachChunked } from "./asyncutil.js";
-import { gitProbe } from "./git.js";
+import { ROOT_CACHE_LIMIT, OBSERVED_ROOT_LIMIT, envInt, forEachChunked, mapLimit } from "./asyncutil.js";
+import { gitProbe, gitReflogAction } from "./git.js";
+import { discoverFiles, filterSupported } from "./build.js";
+import { loadRepoRules } from "./anchors.js";
 import { focus, impact, isTestScope } from "./ops.js";
 import { ensureState, ensureStateBackground, getInflight, getState } from "./state.js";
 import type { RepoState } from "./state.js";
@@ -26,6 +28,14 @@ import { attributeChanges, type SyncProvenance } from "./provenance.js";
 
 interface SyncBaseline {
   version: string;
+  gitKind: "git" | "plain";
+  head: string | undefined;
+  dirty: Set<string>;
+  files: string[];
+  meta: Map<string, { size: number; mtime: number }>;
+  enrolled: Set<string>;
+  closed: boolean;
+  rulesSha: string;
   /** Wall-clock boundary for accepting mutation transitions into this baseline chain. */
   capturedAt: number;
   /** anchor id -> carrier file. Anchor escalation requires carrier drift
@@ -56,7 +66,7 @@ interface SyncBaseline {
 // version stamp keeps shape changes safe: a mismatched slot degrades to a
 // cold store (today's reload behavior) instead of corrupting verdict math —
 // bump BASELINE_STATE_VERSION when SyncBaseline changes incompatibly.
-const BASELINE_STATE_VERSION = 2;
+const BASELINE_STATE_VERSION = 3;
 const BASELINES_SLOT = Symbol.for("pi-fovea:sync-baselines");
 type BaselinesGlobal = typeof globalThis & {
   [BASELINES_SLOT]?: { v: number; map: Map<string, SyncBaseline> };
@@ -81,13 +91,14 @@ const getBaseline = (root: string): SyncBaseline | undefined => {
 const setBaseline = (root: string, baseline: SyncBaseline): void => {
   baselines.delete(root);
   baselines.set(root, baseline);
-  while (baselines.size > ROOT_CACHE_LIMIT) baselines.delete(baselines.keys().next().value!);
+  while (baselines.size > OBSERVED_ROOT_LIMIT) baselines.delete(baselines.keys().next().value!);
 };
 
-export const resetSyncBaselines = (): void => {
-  baselines.clear();
-  warmCache.clear();
-  lastProbe.clear();
+export const resetSyncBaselines = (root?: string): void => {
+  if (root !== undefined) {
+    baselines.delete(root); warmCache.delete(root); lastProbe.delete(root); coldSweeps.delete(root); boundaryProbes.delete(root); return;
+  }
+  baselines.clear(); warmCache.clear(); lastProbe.clear(); coldSweeps.clear(); boundaryProbes.clear();
 };
 
 // Send-path drift probe TTL. The at-most-once-per-window git porcelain probe
@@ -280,16 +291,62 @@ const semanticFacts = (state: RepoState, file: string): string => {
   if (cached !== undefined) return cached;
   const stable = (rows: unknown[][]): string[] => rows.map((row) => JSON.stringify(row)).sort();
   const compactSig = (sig: string): string => sig.replace(/\s+/g, " ").trim();
-  const value = JSON.stringify({
+  const value = createHash("sha1").update(JSON.stringify({
     symbols: stable(facts.symbols.map((symbol) => [symbol.name, symbol.kind, compactSig(symbol.sig), symbol.lang])),
     imports: stable(facts.imports.map((site) => [site.spec])),
     calls: stable(facts.calls.map((site) => [site.callee])),
     literals: stable(facts.literals.map((site) => [site.text])),
     anchors: stable(facts.anchors.map((anchor) => [anchor.id, anchor.kind, anchor.nodeId, anchor.implicit === true])),
     sigs: Object.entries(facts.sigs ?? {}).sort(([a], [b]) => a.localeCompare(b)),
-  });
+  })).digest("hex");
   semanticCache.set(facts, value);
   return value;
+};
+
+// Cold roots retain fingerprints, not graphs. A status/hash probe prevents
+// cycling all 32 graphs through the two-root numerical cache on every turn.
+const coldSweeps = new Map<string, number>();
+const boundaryProbes = new Map<string, number>();
+const rememberProbe = (map: Map<string, number>, root: string): void => {
+  map.delete(root); map.set(root, Date.now());
+  while (map.size > OBSERVED_ROOT_LIMIT) map.delete(map.keys().next().value!);
+};
+const coldManifestDrift = async (root: string, baseline: SyncBaseline, routes: RegExp[]): Promise<boolean> => {
+  // Explicit umbrella scopes keep the existing progressive-boundary oracle.
+  if ((baseline.closed || baseline.enrolled.size) && Date.now() - (boundaryProbes.get(root) ?? 0) >= 4000) {
+    rememberProbe(boundaryProbes, root); return true;
+  }
+  const listing = await discoverFiles(root, routes, baseline.enrolled);
+  if (listing.files.length !== baseline.files.length || listing.files.some((file, i) => file !== baseline.files[i])) return true;
+  const sweep = Date.now() - (coldSweeps.get(root) ?? baseline.capturedAt) >= 20_000;
+  const changed = await mapLimit(listing.files, 32, async file => {
+    try {
+      const info = await stat(join(root, file)), before = baseline.meta.get(file);
+      if (!before || info.size !== before.size || info.mtimeMs !== before.mtime) return true;
+      return sweep && baseline.shas.has(file) && createHash("sha1").update(await readFile(join(root, file))).digest("hex") !== baseline.shas.get(file);
+    } catch { return true; }
+  });
+  if (sweep) rememberProbe(coldSweeps, root);
+  return changed.some(Boolean);
+};
+const coldDrift = async (root: string, baseline: SyncBaseline): Promise<boolean> => {
+  const rules = await loadRepoRules(root);
+  if (rules.sha !== baseline.rulesSha) return true;
+  const routes = rules.fileRoutes.map(rule => new RegExp(rule.re));
+  if (baseline.gitKind !== "git") return coldManifestDrift(root, baseline, routes);
+  const probe = await gitProbe(root);
+  if (!probe || probe.head !== baseline.head || probe.relist) return true;
+  // Include formerly dirty paths so a revert to porcelain-clean is still drift.
+  const candidates = new Set([...baseline.dirty, ...probe.changes.map(change => change.path)]);
+  for (const file of candidates) {
+    const path = join(root, file), info = await stat(path).catch(() => undefined);
+    if (info?.isDirectory() || file.endsWith("/")) return coldManifestDrift(root, baseline, routes);
+    if (!baseline.shas.has(file) && !filterSupported([file], routes).length) continue;
+    try {
+      if (createHash("sha1").update(await readFile(path)).digest("hex") !== baseline.shas.get(file)) return true;
+    } catch { if (baseline.shas.has(file)) return true; }
+  }
+  return false;
 };
 
 const snapshot = async (state: RepoState): Promise<SyncBaseline> => {
@@ -301,15 +358,21 @@ const snapshot = async (state: RepoState): Promise<SyncBaseline> => {
     shas.set(file, facts.sha1);
     semantics.set(file, semanticFacts(state, file));
   });
-  return { version: state.version, capturedAt: Date.now(), anchors, shas, semantics };
+  return { version: state.version, capturedAt: Date.now(), anchors, shas, semantics, gitKind: state.gitKind, head: state.head,
+    dirty: new Set(state.dirty), files: [...state.files], meta: new Map(state.store.meta), enrolled: new Set(state.store.enrolled),
+    closed: state.discovery.closedBoundariesSeen > 0, rulesSha: state.store.rulesSha };
 };
 
 export const sync = async (
   root: string,
   params: SyncParams,
   now?: RepoState,
-  opts?: { probe?: "cheap" | "full" | "defer" },
+  opts?: { probe?: "cheap" | "full" | "defer"; current?: () => boolean },
 ): Promise<SyncOutcome> => {
+  const isCurrent = () => opts?.current?.() !== false;
+  const cancelled = (): SyncOutcome => ({ structural: false, red: false, tokens: 0, details: { cancelled: true } });
+  const commitBaseline = (baseline: SyncBaseline): void => { if (isCurrent()) setBaseline(root, baseline); };
+  if (!isCurrent()) return cancelled();
   if (params.sessionId && params.files?.length) observeSessionPaths(root, params.files);
   let state = now;
   if (!state) {
@@ -318,7 +381,25 @@ export const sync = async (
     // learn to stay quiet this turn and let the background build land.
     const warm = getState(root);
     if (!warm) {
-      if (!getInflight(root)) ensureStateBackground(root);
+      const baseline = getBaseline(root);
+      // The blocking send hook must not serialize 32 cold Git/status probes.
+      // Post-turn observation supplies the backstop; this is not a clean verdict.
+      if (opts?.probe === "defer" && baseline) {
+        return { structural: false, red: false, tokens: 0, details: { version: baseline.version, cold: true, deferred: true } };
+      }
+      if (baseline && !params.files?.length && !(await coldDrift(root, baseline))) {
+        return { structural: false, red: false, tokens: 0, details: { version: baseline.version, cold: true } };
+      }
+      if (!isCurrent()) return cancelled();
+      if (!getInflight(root)) {
+        const kick = ensureStateBackground(root);
+        // Restored roots receive their new baseline even if their graph is
+        // paged out before the next hook. No 32-root rebuild carousel.
+        if (!baseline && opts?.current) void kick.promise.then(async built => {
+          const fresh = await snapshot(built);
+          if (isCurrent() && !baselines.has(root)) commitBaseline(fresh);
+        }).catch(() => {});
+      }
       return { structural: false, red: false, tokens: 0, details: { indexing: true } };
     }
     if (opts?.probe === "defer") {
@@ -343,12 +424,13 @@ export const sync = async (
       state = await ensureState(root, { hints: params.files, force: opts?.probe !== "cheap" });
     }
   }
+  if (!isCurrent()) return cancelled();
   const prev = getBaseline(root);
   if (prev && prev.version === state.version) {
     return { structural: false, red: false, tokens: 0, details: { version: state.version } };
   }
   if (!prev) {
-    setBaseline(root, await snapshot(state));
+    commitBaseline(await snapshot(state));
     return {
       structural: true, red: false, tokens: 0,
       details: { version: state.version, baseline: "established", anchors: state.graph.anchors.length },
@@ -360,8 +442,8 @@ export const sync = async (
   // fire a loud, useless steer on every switch, so the baseline just follows
   // the ref (details.baseline keeps the hooks' ack-clean notify silent too).
   // Heat memory belongs to the old ref's field and does not cross over.
-  if (state.checkout) {
-    setBaseline(root, await snapshot(state));
+  if (state.checkout || (prev.gitKind === "git" && prev.head !== state.head && (await gitReflogAction(root))?.startsWith("checkout:"))) {
+    commitBaseline(await snapshot(state));
     return {
       structural: true, red: false, tokens: 0,
       details: { version: state.version, checkout: true, baseline: "established", anchors: state.graph.anchors.length },
@@ -381,7 +463,7 @@ export const sync = async (
   const scopedSync = params.scope !== "repository" && params.sessionId !== undefined;
   const attentionScopes = [...session.syncScopes].sort();
   const relevantFile = (file: string | undefined): boolean => {
-    if (!scopedSync) return true;
+    if (!scopedSync || session.syncScopes.has(".")) return true;
     if (!file) return false;
     const scope = syncScopeForPath(root, file);
     return scope !== undefined && session.syncScopes.has(scope);
@@ -427,7 +509,7 @@ export const sync = async (
     changed.length === 0 && deleted.length === 0 && added.length === 0 && removed.length === 0;
   if (outsideAttentionOnly) {
     warmCache.delete(root);
-    setBaseline(root, {
+    commitBaseline({
       ...(await snapshot(state)),
       heat: prev.heat,
       warmthArmed: prev.warmthArmed,
@@ -557,7 +639,7 @@ export const sync = async (
   const orderedWarm = [...surprise.entries()]
     .sort((a, b) => b[1] - a[1] || Number(isTestScope(a[0])) - Number(isTestScope(b[0])) || a[0].localeCompare(b[0]))
     .map(([file]) => file);
-  setBaseline(root, {
+  commitBaseline({
     ...(preparedBaseline ?? (await snapshot(state))),
     heat: memory.size ? memory : undefined,
     warmthArmed,

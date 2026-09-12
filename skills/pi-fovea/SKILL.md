@@ -25,21 +25,26 @@ All four accept `maxTokens` (256–16000). Budget is roughly 4 chars per token.
 
 ## Multiple projects/worktrees
 
-Use an explicit graph-tool `root` before editing an alternate authorized project.
-Roots resolve relative to `ctx.cwd`; symlink aliases share identity, linked Git
-worktrees do not. The first call establishes its sync baseline before returning.
-Graph results expose `details.root` and `details.observedRoots`; omitted roots use
-the last binding. Bind every target to observe; after binding, hooks stop using
-an unselected umbrella cwd. Parallel calls should specify roots explicitly.
+Successful native/Fabric `pi.*` path access automatically selects the containing
+project, including disjoint repositories outside cwd. A neutral launch directory
+is not implicitly indexed. Omitted analysis roots use the most recent selection;
+parallel callers should specify `root` explicitly. Explicit Fovea roots remain
+exact directory scopes, resolved relative to `ctx.cwd`. Symlink aliases unify;
+linked Git worktrees do not. Results expose root, origin, and workspace details.
 
-Native paths remain cwd-relative: use absolute paths or `../project/file` for
-edits and grep. Augment grep follows its actual search path's enrolled owner,
-not the active graph binding. Focus or file-seeded impact establishes attention
-for headless shell edits; path events alone never enroll siblings. Alternate
-roots do not inherit cwd project-config trust. Shared sync context and observed
-roots are bounded (`FOVEA_MAX_ROOTS`, default 2; excess enrollment errors).
-Reset/reload/session replacement clears bindings, not reusable extraction facts.
-See README's “Explicit project/worktree continuity (Rakazo)” for the full contract.
+Native tool paths still resolve from cwd: use absolute paths or `../project/file`.
+Augment grep follows its actual search path, not an unrelated active binding.
+Failed/blocked accesses, output text, arbitrary programs, and remote namespaces
+do not enroll projects. Focus or file-seeded impact establishes attention before
+opaque shell edits. Alternate projects do not inherit cwd project-config trust.
+
+The default 32-root recency ring retires its least recently used root on overflow.
+`FOVEA_MAX_ROOTS` can lower that cap; `FOVEA_CACHE_ROOTS` independently defaults to
+two hot graphs. Retirement is an observation gap. First access/re-entry establishes
+a new baseline; a first write cannot be retrospectively attributed or diffed.
+Branch-local roots survive compaction/reload/resume, but old baselines do not.
+Reset clears the ring. Contour shares session-qualified target hints when loaded.
+See README's “Many projects, one conversation” and `docs/workspace.md`.
 
 ## Turn sync
 

@@ -150,101 +150,92 @@ npm i -g pi-fovea      # or: bun add -g pi-fovea, bun add -g pi-fovea
 
 From a checkout, `bun run fovea` runs the live source via `tsx`, and `bun run build:cli` rebuilds `dist/cli.mjs` (the `prepack` hook keeps the published bundle in sync).
 
-## Large workspaces and startup
+## Many projects, one conversation
 
-Indexing runs in the background at `session_start`. Your first prompt never
-waits for ast-grep, hashing, or graph assembly. A cold sync hook reports the
-progress. Later calls reuse the same shared build.
+Your Pi cwd can be a parent folder, a launcher, or unrelated to the work.
+Successful native/Fabric `pi.*` reads, edits, writes, and searches automatically
+select their containing project. Discovery walks bounded ancestors—not siblings
+or the whole filesystem—and accepts only successful structured/literal access.
+Startup and idle hooks do not index an otherwise-unselected launch directory.
 
-A non-Git umbrella directory treats each nested `.git` directory or worktree
-marker as a closed project boundary — until you work in it. The first edit
-hint (or observed drift) inside a nested clone enrolls it into the umbrella
-graph from then on: progressive disclosure, one project at a time, persisted
-with the fact cache so restarts restore your working set. The same rule covers
-submodules and embedded checkouts in Git roots: their contents join the graph
-as `<submodule>/<path>` the first time something inside changes — porcelain
-reports inner drift collapsed to the boundary, which enrolls it automatically —
-and a removed project un-enrolls without leaving orphan facts. Enrollment expands
-index coverage only: with the default session-local sync scope, a sibling project
-can join the umbrella graph and cache without steering conversations that never
-entered it. Every fovea_* tool still accepts a `root` for a full, immediate map
-of one project. `FOVEA_MAX_FILES` caps the merged listing either way.
-Cold runs stay bounded through streamed JSONL cache I/O, 64-file extraction
-batches, adaptive ast-grep chunk splitting, and a two-root resident LRU. The
-limits accept environment overrides:
+**32 observed roots; two hot graphs.** The recency ring refreshes on access.
+Project 33 retires the least recently used root instead of failing. Canonical
+symlink aliases share identity; linked worktrees stay independent. Each root has
+its own heat, attention, semantic baseline, and provenance. Retirement is an
+explicit observation gap, never a clean verdict. Re-entry baselines anew.
+
+```ts
+await pi.read({ path: "/projects/service/src/handler.ts", offset: 1, limit: 40 });
+await extensions.fovea_focus({ query: "src/handler.ts", maxTokens: 1024 });
+// An explicit root still selects an exact directory, including umbrella scopes.
+await extensions.fovea_focus({ root: "../other", query: "entry", maxTokens: 512 });
+```
+
+- Omitted analysis roots use the last selected project. Explicit `root` resolves
+  against **the tool context's cwd**, not process cwd or the previous root.
+  Parallel coordinators should supply it. Native paths remain cwd-relative;
+  neither Fovea nor Contour changes cwd. Results carry `details.root`,
+  `observedRoots`, `workspace` (capacity/retirements), and `agentOrigin`.
+- Enrollment happens after success, not before permission checks. Failed or
+  blocked calls enroll nothing. Automatic discovery excludes broad/system,
+  private, dependency, and generated locations. It does not parse arbitrary
+  programs or trust output text. Literal shell cwd forms are supported; opaque
+  programs and remote filesystems need explicit coordination.
+- Indexing expands a successful path to a project scope. This is **not a sandbox
+  or a project-trust grant**. `.pi/fovea.json` is honored only for the exact
+  canonical trusted `ctx.cwd`; parent/sibling trust does not propagate. Existing
+  declarative `.fovea/rules.json` extraction rules are unchanged. Hosts with
+  finer-grained analysis permissions must enforce them separately.
+- The first access is a new observation boundary. A first write may already be
+  included in it; Fovea does not invent its prior delta or authorship. Contour
+  still compares that project's patch with Git. Subsequent focus calls do not
+  consume pending drift. Focus/file-seeded impact establishes attention before
+  opaque shell edits; hintless changes in enrolled roots remain detectable.
+- Native augment grep follows the physical owner of its actual search path,
+  never an unrelated active graph. No-path native grep still searches cwd.
+  Legacy replace-mode bare graph queries use the selected root; native options
+  retain cwd semantics.
+- Sync spends one shared context allowance on relevant messages, including root
+  labels and retirement notices—not an equal slice for every quiet root. Cold
+  unchanged Git roots do not rebuild graphs, and cold probes stay off the
+  blocking before-agent hook. Numerical paging retains logical focus/attention.
+- Branch-local bounded root snapshots survive compaction, reload, resume, fork,
+  and tree navigation. Semantic baselines and trust are not restored. `/fovea
+  reset` clears the ring; `/fovea status` reports selection and capacity. The CLI
+  stays stateless. Fovea and Contour exchange session-qualified target hints,
+  not heat, source content, trust, or mutation authorship.
+
+### Bounded indexing
+
+Explicit umbrella graphs retain progressive nested-repository/submodule
+boundaries: projects join that graph as their contents are worked in, subject to
+`FOVEA_MAX_FILES`. Automatic project selection does not create an umbrella graph
+just because unrelated projects share a parent directory. Cold extraction keeps
+streamed JSONL caches, 64-file batches, adaptive ast-grep chunk splitting, and
+bounded I/O/process concurrency.
 
 | Variable | Default | Meaning |
 | --- | :---: | --- |
+| `FOVEA_MAX_ROOTS` | `32` | observed recency ring, clamped to 1–32 |
+| `FOVEA_CACHE_ROOTS` | `2` | hot graph/fact/vector cache residency, separate from observation |
 | `FOVEA_MAX_FILES` | `8000` | maximum indexed files in one graph |
 | `FOVEA_MAX_FILE_BYTES` | `1048576` | maximum bytes extracted from one source file |
-| `FOVEA_MAX_ROOTS` | `2` | observed execution roots and resident graph, fact, session, sync, and root-metadata caches |
-| `FOVEA_SPAWN_CONCURRENCY` | `3` | concurrent ast-grep/git child processes (ast-grep parallelizes parsing inside each process; values above ~4 rarely help) |
-| `FOVEA_MEMORY_HALF_LIFE_HOURS` | `48` | wall-clock half-life of the per-node sync memory (charged cascade warmth) |
+| `FOVEA_SPAWN_CONCURRENCY` | `3` | concurrent ast-grep/Git subprocesses |
 | `FOVEA_IO_CONCURRENCY` | `32` | concurrent file stat/read operations |
-| `FOVEA_GIT_UNTRACKED_CACHE` | enabled | set to `0` to disable the native Git untracked-directory cache requested by freshness probes |
+| `FOVEA_MEMORY_HALF_LIFE_HOURS` | `48` | wall-clock half-life of charged cascade memory |
+| `FOVEA_GIT_UNTRACKED_CACHE` | enabled | set `0` to disable Git's native untracked-directory cache |
 | `FOVEA_MAX_SUBMODULE_DEPTH` | `4` | recursion cap for nested submodules |
 
-Freshness probes still consult Git on every call; there is no new time-based shortcut. One porcelain-v2 status supplies both HEAD and changes, with a legacy fallback. At a verified worktree root, Fovea requests Git's native untracked-directory cache and omits the redundant dot pathspec that prevents its use. Subroots and Git environment overrides keep their explicit path scope. This can update Git index metadata, but does not change Git configuration files. Set `FOVEA_GIT_UNTRACKED_CACHE=0` to opt out; `GIT_OPTIONAL_LOCKS=0` can also prevent cache updates. Dirty files, new directories, ignore changes, and repository-boundary changes still go through freshness checks.
+Root-discovery metadata is coalesced and TTL-cached; it never certifies source
+freshness. Git status/content hashes and bounded manifest/boundary sweeps remain
+the drift oracle, including dirty-to-clean reverts. Local Git analysis disables
+fsmonitor and remote/lazy fetching. Native untracked caching can still update
+Git **index metadata**, not Git configuration; opt out with
+`FOVEA_GIT_UNTRACKED_CACHE=0` or `GIT_OPTIONAL_LOCKS=0`.
 
-Files over the size cap keep their place in the model's view of the repo.
-Failed extractions do the same. You find both in `/fovea status` and in tool
-details.
-
-## Explicit project/worktree continuity (Rakazo)
-
-The extension's existing four graph tools are the headless binding API; no new
-host event or trust flag is required:
-
-```ts
-await extensions.fovea_focus({ root: "../project-b", query: "src/handler.ts", maxTokens: 1024 });
-// Baseline is ready before this resolves (unless target sync is disabled).
-// Native tools still use the host cwd: use absolute paths or cwd-relative paths.
-await pi.edit({ path: "../project-b/src/handler.ts", old: "before", new: "after" });
-await extensions.fovea_dwell({ maxTokens: 512 }); // last bound root
-```
-
-- `root` resolves against **the tool context's cwd**, not process cwd or the last
-  binding. Real paths unify symlink aliases; linked Git worktrees remain distinct
-  even when they share HEAD and a common Git directory. Roots are exact directory
-  scopes, not automatically promoted to Git toplevels.
-- Cwd is the startup/fallback observation target. After a graph call binds a root,
-  hooks inspect only the bound set. Bind each project you want observed; an
-  alternate binding does not keep an otherwise-unselected umbrella cwd active.
-  Calls without `root` use the last binding. Parallel coordinators should always
-  supply `root`; enrollment is serialized in invocation order. Results include
-  canonical `details.root` and sorted `details.observedRoots`.
-- A first binding establishes that target's semantic baseline before edits can
-  follow. Subsequent focus calls do not consume pending drift. Before-prompt and
-  post-turn sync compare every bound target, including hintless shell/Fabric/editor
-  changes. Attention remains target-local: focus a file/symbol or use
-  `fovea_impact({ root, files: ["src/file.ts"], includeUncommitted: false })` before
-  a headless mutation to enter its scope. Ordinary path events never enroll a new
-  root; they route to the most specific enrolled physical owner.
-- Native read/edit/write/search paths **do not change cwd**. Augment-mode grep
-  attaches only the graph of the enrolled owner of its actual cwd-relative or
-  absolute search path. No-path native grep still searches cwd; it never appends
-  an unrelated alternate graph. In legacy replace mode, bare graph queries and
-  their miss fallback use the bound root; explicit native options retain cwd
-  semantics. Each target's grep mode is checked independently.
-- Binding is an explicit request to index a directory, **not a sandbox or a trust
-  grant**. Rakazo must authorize tool arguments itself. `.pi/fovea.json` is loaded
-  only when that exact canonical target equals `ctx.cwd` and the context is
-  trusted. Parent/sibling trust never authorizes it; alternate targets use global
-  defaults. To honor a target's project config, run it in its own trusted Pi
-  context. Config cache keys include trust and agent directory. Existing
-  target-local declarative `.fovea/rules.json` extraction rules are unchanged.
-- All roots share one per-hook `sync.budget` allowance from the session cwd's
-  effective config, divided evenly and capped again by each target's budget;
-  root labels count toward that allowance. Hidden targets remain hidden (a mixed
-  pre-prompt aggregate is hidden). Graph calls keep their individual `maxTokens`.
-  Enrollment is capped by `FOVEA_MAX_ROOTS` (default 2); excess roots fail before
-  indexing rather than silently losing a baseline. Set this before startup for
-  larger coordinated runs.
-- `/fovea status` reports the bound root and observed count. `/fovea reset`,
-  shutdown, new/resume/fork/reload clear bindings and conversation baselines;
-  reusable content facts remain cached. Rebind after session replacement.
-  The standalone CLI remains stateless; these continuity semantics belong to
-  the Pi extension lifecycle.
+Oversized files and failed extractions remain visible coverage gaps in status
+and tool details. See the [full workspace contract and shared API](docs/workspace.md)
+for boundaries, persistence, scheduling, and remaining limitations.
 
 ## Turn sync
 

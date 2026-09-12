@@ -40,6 +40,8 @@ describe.skipIf(!hasAstGrep())("turn sync", () => {
     }
     const state = {
       version: "synthetic-baseline",
+      gitKind: "plain", head: undefined, dirty: new Set(), files: Object.keys(facts),
+      store: { meta: new Map(), enrolled: new Set(), rulesSha: "synthetic" }, discovery: { closedBoundariesSeen: 0 },
       facts,
       graph: { anchors: [] },
     } as unknown as RepoState;

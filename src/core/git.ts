@@ -5,7 +5,7 @@
 import { execFile } from "node:child_process";
 import { posix, join } from "node:path";
 import { stat } from "node:fs/promises";
-import { ROOT_CACHE_LIMIT, spawnGate } from "./asyncutil.js";
+import { OBSERVED_ROOT_LIMIT, spawnGate } from "./asyncutil.js";
 
 const GIT_TIMEOUT = 15_000;
 
@@ -20,8 +20,10 @@ export const gitOut = async (
       new Promise<string | undefined>((resolve) => {
         execFile(
           "git",
-          ["-C", root, ...args],
+          ["-c", "core.fsmonitor=false", "-C", root, ...args],
           {
+            // Local analysis must not run repository hooks or lazily fetch objects.
+            env: { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "", GIT_TERMINAL_PROMPT: "0" },
             encoding: "utf8",
             timeout: opts.timeout ?? GIT_TIMEOUT,
             maxBuffer: opts.maxBuffer ?? 64 * 1024 * 1024,
@@ -89,7 +91,7 @@ export const gitPrefix = async (root: string): Promise<string | undefined> => {
   const prefix = out.trim().replace(/\\/g, "/");
   gitPrefixes.delete(root);
   gitPrefixes.set(root, prefix);
-  while (gitPrefixes.size > ROOT_CACHE_LIMIT) gitPrefixes.delete(gitPrefixes.keys().next().value!);
+  while (gitPrefixes.size > OBSERVED_ROOT_LIMIT) gitPrefixes.delete(gitPrefixes.keys().next().value!);
   return prefix;
 };
 

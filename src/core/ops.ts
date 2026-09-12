@@ -9,7 +9,7 @@ import { join, posix } from "node:path";
 import { diffHunks, prFiles, uncommittedFiles } from "./git.js";
 import { chebyshevVectors, chooseOrder, extendChebyshevVectors, forwardHeat, heatField } from "./heat.js";
 import { formatNodeLocation, revealFoveated, revealGroups, tokenEstimate, type GroupLine, type RevealedNode } from "./render.js";
-import { clearSessionFocus, FOCUS_T0, getSession, observeSessionPaths } from "./session.js";
+import { clearSessionFocus, FOCUS_T0, getSession, observeSessionPaths, retainSessionVectors } from "./session.js";
 import { detectBasins } from "./basins.js";
 import { classifyLiteral, normalizeLiteral } from "./join.js";
 import { isTestFile } from "./extract.js";
@@ -610,6 +610,7 @@ export const focus = async (
   }
   session.generation = state.generation;
   if (session.tkKey !== key) {
+    retainSessionVectors(root);
     session.tk = chebyshevVectors(state.csr, seedVector(g.nodes.length, seeds), chooseOrder(session.t));
     session.tkKey = key;
   }
@@ -657,7 +658,7 @@ export const dwell = async (root: string, factor?: number, budget?: number): Pro
   const g = state.graph;
   const session = getSession(root);
   const B = clampBudget(budget, 512);
-  if (session.seeds.length && (session.generation !== state.generation || session.tk[0]?.length !== g.nodes.length)) {
+  if (session.seeds.length && (session.generation !== state.generation || (session.tk.length > 0 && session.tk[0]?.length !== g.nodes.length))) {
     const previousGeneration = session.generation || "unknown";
     clearSessionFocus(session);
     const text = `fovea dwell: focus expired because the graph changed (${previousGeneration} → ${state.generation}). Call fovea_focus again; no stale vector was applied.`;
@@ -670,6 +671,11 @@ export const dwell = async (root: string, factor?: number, budget?: number): Pro
   if (!session.seeds.length) {
     const text = "fovea dwell: no focus yet. Call fovea_focus with a symbol, feature id, route, or file first; dwell then deepens that field.";
     return { text, tokens: tokenEstimate(text), details: { seeds: 0, ...extractionDetails(state) } };
+  }
+  if (!session.tk.length) {
+    retainSessionVectors(root);
+    session.tk = chebyshevVectors(state.csr, seedVector(g.nodes.length, session.seeds), chooseOrder(session.t));
+    session.tkKey = session.focusKey;
   }
   const from = session.t;
   const to = Math.min(64, from * Math.max(1.2, factor ?? 2));
