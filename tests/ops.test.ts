@@ -11,6 +11,7 @@ import {
   ensureStateBackground,
   evictState,
   focus,
+  resolveSeeds,
   getInflight,
   getState,
   impact,
@@ -18,6 +19,7 @@ import {
 } from "../src/core/ops.js";
 import { getSession, resetSessions } from "../src/core/session.js";
 import * as state from "../src/core/state.js";
+import { chooseOrder } from "../src/core/heat.js";
 
 const FIXTURE = new URL("./fixtures/mini", import.meta.url).pathname;
 
@@ -33,6 +35,37 @@ describe("extracted module compatibility", () => {
 });
 
 describe.skipIf(!hasAstGrep())("fovea ops on the minimonorepo", () => {
+  it("builds heat orders on demand and reuses the prefix across dwell and focus", async () => {
+    resetSessions();
+    const state = await ensureState(FIXTURE);
+    await focus(FIXTURE, "loadUser", 512, {}, state);
+    const session = getSession(FIXTURE);
+    expect(session.tk).toHaveLength(chooseOrder(2) + 1);
+    const prefix = [...session.tk], key = session.tkKey;
+    await dwell(FIXTURE, 32, 512);
+    expect(session.tk.length).toBeGreaterThanOrEqual(chooseOrder(64) + 1);
+    prefix.forEach((vector, i) => expect(session.tk[i]).toBe(vector));
+    const wide = session.tk;
+    await focus(FIXTURE, "loadUser", 512, {}, state);
+    expect(session.tk).toBe(wide);
+    expect(session.tkKey).toBe(key);
+    expect(session.t).toBe(64);
+  });
+
+  it("invalidates derived name data when a synthetic node is renamed", async () => {
+    const state = await ensureState(FIXTURE);
+    const index = resolveSeeds(state, "switchServer").seeds.find(i => state.graph.nodes[i]!.name.includes("switchingServers"))!;
+    expect(index).toBeDefined();
+    const node = state.graph.nodes[index]!, name = node.name;
+    try {
+      node.name = "ClientConnection.jumpingWidgets";
+      expect(resolveSeeds(state, "jumpWidget").seeds).toContain(index);
+      expect(resolveSeeds(state, "jumpWidget", { language: "python" }).seeds).not.toContain(index);
+    } finally { node.name = name; }
+    expect(resolveSeeds(state, "switchServer").seeds).toContain(index);
+  });
+
+
   it("builds the graph with anchors and cross-language join edges", async () => {
     const s = await ensureState(FIXTURE);
     expect(s.graph.anchors.length).toBeGreaterThanOrEqual(2);

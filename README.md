@@ -66,7 +66,7 @@ Focus normalizes camelCase and common inflections. An approximate name such as
 match returns the nearest symbols plus their locations. Direct graph edges
 carry labels such as caller, callee, route, shared literal, and co-change, plus
 deterministic `strategy` / `rule` / `source` evidence. Every tool result includes
-a coverage ledger; an explicit missing path says whether it is unsupported,
+a coverage report; an explicit missing path says whether it is unsupported,
 ignored, oversized, generated, unreadable, Git-listed but unavailable, beyond
 the file cap, behind a closed nested-repository boundary, or absent. Symbols
 that merely share a file stay collapsed.
@@ -181,7 +181,10 @@ limits accept environment overrides:
 | `FOVEA_SPAWN_CONCURRENCY` | `3` | concurrent ast-grep/git child processes (ast-grep parallelizes parsing inside each process; values above ~4 rarely help) |
 | `FOVEA_MEMORY_HALF_LIFE_HOURS` | `48` | wall-clock half-life of the per-node sync memory (charged cascade warmth) |
 | `FOVEA_IO_CONCURRENCY` | `32` | concurrent file stat/read operations |
+| `FOVEA_GIT_UNTRACKED_CACHE` | enabled | set to `0` to disable the native Git untracked-directory cache requested by freshness probes |
 | `FOVEA_MAX_SUBMODULE_DEPTH` | `4` | recursion cap for nested submodules |
+
+Freshness probes still consult Git on every call; there is no new time-based shortcut. One porcelain-v2 status supplies both HEAD and changes, with a legacy fallback. At a verified worktree root, Fovea requests Git's native untracked-directory cache and omits the redundant dot pathspec that prevents its use. Subroots and Git environment overrides keep their explicit path scope. This can update Git index metadata, but does not change Git configuration files. Set `FOVEA_GIT_UNTRACKED_CACHE=0` to opt out; `GIT_OPTIONAL_LOCKS=0` can also prevent cache updates. Dirty files, new directories, ignore changes, and repository-boundary changes still go through freshness checks.
 
 Files over the size cap keep their place in the model's view of the repo.
 Failed extractions do the same. You find both in `/fovea status` and in tool
@@ -342,10 +345,7 @@ effective while its global default is being edited.
 | `tools.grepMode` | `"augment"` | `"augment"\u0020keeps native grep and appends a Fovea graph section to symbol-query results (works with `pi.grep` inside fabric_exec too); `"replace"` keeps the legacy takeover where bare symbol queries navigate the graph instead of returning lines; `"off"` is native grep only. The legacy boolean `tools.replaceGrep` still parses (`true`\u2192`"replace"`, `false`\u2192`"off"`) and loses to an explicit `grepMode`. |
 | `tools.grepAugmentBudget` | `512` | token cap for the appended graph section |
 
-Budgets cap the rendered view, not the map: whenever sketch, focus, dwell, or
-impact truncate results for budget, the full list spills to
-`$TMPDIR/pi-fovea-<op>-<hash>.txt` and the footer names the path — read or grep
-the file for the remainder. `fovea_dwell` remains the semantic widen.
+Budgets cap the rendered view, not the map. Focus and dwell keep every eligible candidate recoverable beyond both the token budget and the 400-candidate display cap. Their `details.lit` counts the full eligible set, while `details.candidateOmitted` counts display-cap exclusions. Whenever a view truncates, the full list spills to `$TMPDIR/pi-fovea-<op>-<hash>.txt` if writable, and the footer names the path. Read or grep that artifact for the remainder; a failed write never produces a false path. Scope filters, already-disclosed nodes, and nodes below the heat cutoff are not added to overflow. `fovea_dwell` remains the semantic widen.
 
 ## How routes are found
 
@@ -464,6 +464,12 @@ filesystem walk reports an unknown omission count instead of inventing one.
 `/fovea status` and `fovea status` use this same ledger rather than comparing
 unlike tracked and supported file counts.
 
+Import diagnostics live in `details.coverage.imports`: captured sites are classified as resolved, possible, or unresolved, with bounded examples, cap counts, and languages lacking import readers. Unresolved includes external packages and unmodeled resolution—not necessarily broken code. JS/TS literal `import()` and `require()` targets resolve normally. A relative one-hole expression such as `import('./plugins/' + name + '.js')` or ``require(`./plugins/${name}.js`)`` can connect up to 32 matching in-scope files through explicitly **possible** import edges. A family scans at most 4,096 files; exceeding either limit emits no partial family and reports the cap. Unknown expressions remain unresolved. Possible imports do not become exact call or test edges.
+
+This is a finite candidate approximation, not a bound on runtime values: variables can contain traversal segments or name generated, external, or excluded modules. Conductance encodes a prior, not a calibrated probability. Selected files have file nodes by construction; relationship completeness, future edits, runtime behavior, and business requirements do not follow from that membership.
+
+The [39-repository paired corpus](docs/coverage-corpus.md) checks this boundary without repository execution or useful co-change history. It distinguishes ordinary diffused probes from uniform-field display-cap stress, records unsupported/excluded files, and retains failures rather than replacing repositories. The dynamic-family observation is limited to one Vue build utility; regression fixtures separately exercise runtime plugin loading and capped/unknown cases.
+
 ## How it works
 
 The repo compiles to a typed graph. Your question becomes a source vector $s$
@@ -525,10 +531,14 @@ Exact contract topology: **Protocol Buffers (`.proto`) and GraphQL (`.graphql`, 
 
 ```sh
 bun install
-bun run check        # typecheck + full vitest suite
+bun run check        # typecheck + full vitest suite + knip
 bun run bench        # rate–distortion and refresh bench against ../pi-fabric
 bun run bench tests/fixtures/mini  # self-contained smoke run
 ```
+
+The [warm-path performance report](docs/performance.md) compares the coverage-complete implementation with the optimized version. `bun run corpus:performance <coverage-work> <before-source> <after-source> [rounds]` runs alternating, isolated comparisons with a shared extraction snapshot, independent Git indexes, and exact graph, focus/dwell/sketch, and overflow-content checks. It does not trade fewer candidates or weaker freshness checks for speed. For Node, run `NODE_OPTIONS='--import tsx' node scripts/performance-corpus.mjs ...`; development dependencies are required.
+
+Warm matching derives query terms once and caches normalized symbol names by weak node identity, checking renames before reuse. Focus builds only the heat orders currently needed; dwell appends missing orders without replacing its existing basis. No new kernel or review state is introduced. Independent cold extraction can select different literal-join locations when capture order varies, so this paired benchmark deliberately makes no cold-extraction speedup claim.
 
 The developer benchmark gates timings on semantic equivalence: cold versus
 cached builds, and forced refresh versus clean rebuild after unchanged,

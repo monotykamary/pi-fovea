@@ -38,6 +38,7 @@ export interface NodeRec {
 type EdgeStrategy =
   | "file-membership"
   | "relative-import"
+  | "computed-import-family"
   | "python-module"
   | "go-module-suffix"
   | "rust-module"
@@ -65,6 +66,8 @@ export interface EdgeEvidence {
   /** Canonical literal or feature key when one is the exact join witness. */
   key?: string;
   implicit?: boolean;
+  /** A bounded possible target, never an exact runtime dependency. */
+  possible?: boolean;
 }
 
 export interface Edge {
@@ -89,6 +92,17 @@ export interface Anchor {
   implicit?: boolean; // tier-3 discovered shape: half hub gravity, shown with △
 }
 
+export interface ImportCoverage {
+  sites: number;
+  resolved: number;
+  possible: number;
+  unresolved: number;
+  capped: number;
+  unsupportedLanguages: string[];
+  examples: Array<{ file: string; line: number; spec: string; status: "possible" | "unresolved" | "capped"; reason: string }>;
+  examplesOmitted: number;
+}
+
 export interface Graph {
   nodes: NodeRec[];
   edges: Edge[];
@@ -96,6 +110,8 @@ export interface Graph {
   byFile: Map<string, number[]>;   // file -> node indices (sorted by line)
   anchors: Anchor[];
   files: string[];
+  /** Current extraction/resolution diagnostics, not persistent workflow state. */
+  importCoverage?: ImportCoverage;
 }
 
 export interface SymbolRec {
@@ -108,6 +124,12 @@ export interface SymbolRec {
   lang: string;
 }
 
-export interface ImportSite { file: string; spec: string; line: number; }
+export interface ImportSite {
+  file: string;
+  spec: string;
+  line: number;
+  /** Captured computed expression; absent bounds mean the target is unresolved. */
+  dynamic?: { prefix?: string; suffix?: string };
+}
 export interface CallSite { file: string; line: number; callee: string; }
 export interface LiteralSite { file: string; line: number; text: string; }

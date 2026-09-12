@@ -42,7 +42,9 @@ const RELATION_PRIORITY: Record<EdgeKind, number> = {
 const relationLabel = (edge: Edge, seedAtA: boolean, candidate: NodeRec): string => {
   switch (edge.kind) {
     case "invokes": return seedAtA ? "→ callee" : "← caller";
-    case "imports": return seedAtA ? "→ import" : "← importer";
+    case "imports": return edge.evidence?.possible
+      ? seedAtA ? "→ possible import" : "← possible importer"
+      : seedAtA ? "→ import" : "← importer";
     case "tests": return seedAtA ? "→ subject" : "← test";
     case "inherits": return seedAtA ? "→ parent" : "← subclass";
     case "anchors": return seedAtA ? candidate.kind === "file" ? "→ feature file" : "→ handler" : "← feature";
@@ -102,7 +104,8 @@ export interface FitResult {
   tokens: number;
   shown: number;      // individually rendered nodes
   suppressed: number; // skipped because already disclosed
-  litTotal: number;   // candidates above threshold before suppression
+  litTotal: number;   // eligible candidates after scope/disclosure filtering
+  candidateOmitted: number; // outside the display cap, still included in overflow
   truncated: boolean;
   overflowPath?: string; // tmp artifact holding the full list, when it spilled
 }
@@ -123,7 +126,7 @@ export interface RevealOptions {
   seeds?: readonly number[];
   repeatNucleus?: boolean;
   budget: number;
-  maxCandidates?: number;
+  maxCandidates?: number; // display work only; never truncates the overflow list
   // When set and the fit truncates, the FULL list spills to this tmp file and
   // the footer names the path — same contract as pi's bash output-accumulator.
   overflowTo?: string;
@@ -137,7 +140,7 @@ export const revealFoveated = (
   let vmax = 0;
   for (let i = 0; i < field.length; i++) if (field[i]! > vmax) vmax = field[i]!;
   if (vmax <= 0) {
-    return { text: `${opts.header ?? "fovea"}\n(nothing matched the current graph)`, tokens: 0, shown: 0, suppressed: 0, litTotal: 0, truncated: false, revealedIds: [], revealed: [] };
+    return { text: `${opts.header ?? "fovea"}\n(nothing matched the current graph)`, tokens: 0, shown: 0, suppressed: 0, litTotal: 0, candidateOmitted: 0, truncated: false, revealedIds: [], revealed: [] };
   }
   const seedSet = new Set(opts.seeds ?? []);
   const relations = directRelations(g, seedSet);
@@ -160,9 +163,10 @@ export const revealFoveated = (
     const bPriority = seedSet.has(b) ? 2 : relations.get(b)?.kind === "contains" ? 0 : relations.has(b) ? 1 : 0;
     return bPriority - aPriority || byHeat(a, b);
   });
-  const cap = opts.maxCandidates ?? 400;
+  const cap = Math.max(0, Math.floor(opts.maxCandidates ?? 400));
   const capped = candidates.slice(0, cap);
-  const litTotal = capped.length;
+  const litTotal = candidates.length;
+  const candidateOmitted = litTotal - capped.length;
 
   // Individual lines first (hot signatures, warm one-liners), then the cheap
   // glow periphery collapsed per file. The prefix is over BOTH lists so the
@@ -233,6 +237,12 @@ export const revealFoveated = (
       glowCounts.set(node.file, (glowCounts.get(node.file) ?? 0) + 1);
     }
   }
+  // Display caps bound the in-context work, not the recoverable candidate set.
+  // Cold-but-eligible tail nodes keep individual locations in the full artifact.
+  for (let at = capped.length; at < candidates.length; at++) {
+    const node = g.nodes[candidates[at]!]!;
+    allItems.push(`  · ${node.name} (${node.kind}) ${formatNodeLocation(node)}`);
+  }
   const glowLines = [...glowCounts.entries()]
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .map(([file, c]) => `  ~ +${c} more in ${file}`);
@@ -287,6 +297,7 @@ export const revealFoveated = (
     shown,
     suppressed,
     litTotal,
+    candidateOmitted,
     truncated,
     overflowPath,
     revealedIds: ids.slice(0, shown),
@@ -341,6 +352,7 @@ export const revealGroups = (
     shown: Math.min(ordered.length, ordered.length),
     suppressed: 0,
     litTotal: ordered.length,
+    candidateOmitted: 0,
     truncated: ordered.length > 0 && kBest < ordered.length,
     overflowPath,
   };

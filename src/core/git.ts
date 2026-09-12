@@ -3,7 +3,8 @@
 // so even a 50ms spawnSync per turn is a hang tax we no longer pay.
 
 import { execFile } from "node:child_process";
-import { posix } from "node:path";
+import { posix, join } from "node:path";
+import { stat } from "node:fs/promises";
 import { ROOT_CACHE_LIMIT, spawnGate } from "./asyncutil.js";
 
 const GIT_TIMEOUT = 15_000;
@@ -64,7 +65,7 @@ interface WorktreeChange {
 }
 
 /**
- * Cheap drift probe: HEAD + `status --porcelain -z`.
+ * Fresh drift probe: one porcelain-v2 status carries both HEAD and changes.
  * Returns undefined when root is not (inside) a git work tree.
  * Any parse surprise yields `relist: true` so callers can fall back to a
  * full rescan instead of trusting partial change sets.
@@ -99,8 +100,56 @@ const gitRelativePath = (path: string, prefix: string): string | undefined => {
 };
 
 export const gitProbe = async (root: string): Promise<GitProbe | undefined> => {
-  const prefix = await gitPrefix(root);
+  let prefix = await gitPrefix(root);
   if (prefix === undefined) return undefined;
+  const marker = await stat(join(root, ".git")).then(info => info.isFile() || info.isDirectory(), () => false);
+  const overridden = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"].some(key => process.env[key] !== undefined);
+  // A removed/new root marker or an explicit Git environment can change what
+  // a cached prefix means. Never let that broaden a formerly nested scope.
+  if ((prefix === "") !== marker || overridden) {
+    gitPrefixes.delete(root);
+    prefix = await gitPrefix(root);
+    if (prefix === undefined) return undefined;
+  }
+  // A root-wide dot pathspec disables Git's untracked cache. Omit it only at
+  // a worktree root; subroots must not scan outside their selected scope.
+  // This requests index metadata, not a change to any Git configuration file.
+  const out = await gitOut(root, [
+    "-c", `core.untrackedCache=${process.env.FOVEA_GIT_UNTRACKED_CACHE !== "0"}`,
+    "status", "--porcelain=v2", "--branch", "--no-ahead-behind", "-z",
+    "--untracked-files=normal", "--no-renames", ...(prefix || !marker || overridden ? ["--", "."] : []),
+  ]);
+  if (out === undefined) return legacyProbe(root, prefix);
+  let head: string | undefined;
+  let relist = false;
+  const changes: WorktreeChange[] = [];
+  for (const field of out.split("\0")) {
+    if (!field) continue;
+    if (field.startsWith("# branch.oid ")) {
+      const oid = field.slice(13);
+      if (oid === "(initial)") head = "";
+      else if (/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(oid)) head = oid;
+      continue;
+    }
+    if (field.startsWith("# ")) continue;
+    let code: string, raw: string;
+    if (field.startsWith("? ") || field.startsWith("! ")) {
+      code = field[0]!.repeat(2);
+      raw = field.slice(2);
+    } else if (field.startsWith("1 ") || field.startsWith("u ")) {
+      const parts = field.split(" ");
+      code = (parts[1] ?? "").replace(/\./g, " ");
+      raw = parts.slice(field[0] === "1" ? 8 : 10).join(" ");
+    } else { relist = true; continue; }
+    const path = gitRelativePath(raw, prefix);
+    if (!path || !/^[ MARCUD?!]{2}$/.test(code)) { relist = true; continue; }
+    changes.push({ code, path });
+  }
+  // Older Git or unexpected protocol output falls back to the existing oracle.
+  return head === undefined ? legacyProbe(root, prefix) : { head, changes, relist };
+};
+
+const legacyProbe = async (root: string, prefix: string): Promise<GitProbe | undefined> => {
   const out = await gitOut(root, [
     "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--no-renames", "--", ".",
   ]);

@@ -1,11 +1,11 @@
 import { basename, posix } from "node:path";
 import { forEachChunked } from "./asyncutil.js";
 import { LANG_BY_EXT } from "./astgrep.js";
-import { isTestFile } from "./extract.js";
+import { isTestFile, supportsImportExtraction } from "./extract.js";
 import { buildJoinIndex, type JoinIndex } from "./join.js";
 import type { AnchorDraft } from "./anchors.js";
 import type { FileFacts } from "./build.js";
-import type { Edge, EdgeEvidence, Graph, LiteralSite, NodeRec } from "./types.js";
+import type { Edge, EdgeEvidence, Graph, ImportCoverage, ImportSite, LiteralSite, NodeRec } from "./types.js";
 
 const CODE_EXTS_BY_LANGFAMILY: Record<string, string[]> = {
   ts: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
@@ -153,6 +153,56 @@ const resolveImportToFile = (
     : undefined;
 };
 
+interface ImportFamily { files: string[]; reason?: string; capped?: boolean }
+
+// Resolve only an in-scope literal path family, not arbitrary runtime values.
+// Refuse broad families rather than emitting an unexplained partial target set.
+const importFamilyResolver = (files: string[]) => {
+  const sorted = [...files].sort();
+  const cache = new Map<string, ImportFamily>();
+  return (site: ImportSite): ImportFamily => {
+    const bounds = site.dynamic;
+    if (langFamily(site.file) !== "ts" || bounds?.prefix === undefined || bounds.suffix === undefined ||
+      (!bounds.prefix.startsWith("./") && !bounds.prefix.startsWith("../"))) {
+      return { files: [], reason: "computed target is not a bounded relative literal-prefix/suffix expression" };
+    }
+    const joined = posix.join(posix.dirname(site.file), bounds.prefix);
+    const prefix = joined === "." || joined === "./" ? "" : joined;
+    if (prefix === ".." || prefix.startsWith("../") || posix.isAbsolute(prefix)) {
+      return { files: [], reason: "computed family lies outside the selected root" };
+    }
+    const key = JSON.stringify([prefix, bounds.suffix]);
+    const cached = cache.get(key);
+    if (cached) return cached;
+    let lo = 0, hi = sorted.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (sorted[mid]! < prefix) lo = mid + 1; else hi = mid;
+    }
+    const hits: string[] = [];
+    let examined = 0;
+    for (let at = lo; at < sorted.length && sorted[at]!.startsWith(prefix); at++) {
+      if (++examined > 4096) {
+        const result = { files: [], capped: true, reason: "computed family scan exceeded 4096 files; no possible edges emitted" };
+        cache.set(key, result);
+        return result;
+      }
+      const file = sorted[at]!;
+      const runtime = file.replace(/\.tsx?$/, ".js").replace(/\.mts$/, ".mjs").replace(/\.cts$/, ".cjs");
+      if (!file.endsWith(bounds.suffix) && !runtime.endsWith(bounds.suffix)) continue;
+      hits.push(file);
+      if (hits.length > 32) {
+        const result = { files: [], capped: true, reason: "computed family exceeds 32 possible targets; no possible edges emitted" };
+        cache.set(key, result);
+        return result;
+      }
+    }
+    const result = hits.length ? { files: hits } : { files: [], reason: "no matching targets in the selected graph" };
+    cache.set(key, result);
+    return result;
+  };
+};
+
 const addNode = (nodes: NodeRec[], seen: Map<string, number>, rec: NodeRec): number => {
   const hit = seen.get(rec.id);
   if (hit !== undefined) return hit;
@@ -237,6 +287,18 @@ export const assembleGraphWithIndex = async (
   }
 
   const importIndex = buildImportIndex(files);
+  const resolveFamily = importFamilyResolver(files);
+  const importCoverage: ImportCoverage = {
+    sites: 0, resolved: 0, possible: 0, unresolved: 0, capped: 0,
+    unsupportedLanguages: [...new Set(files.map((file) => LANG_BY_EXT[file.split(".").pop()?.toLowerCase() ?? ""])
+      .filter((language): language is string => !!language && !supportsImportExtraction(language)))].sort(),
+    examples: [], examplesOmitted: 0,
+  };
+  const noteImport = (site: ImportSite, status: ImportCoverage["examples"][number]["status"], reason: string): void => {
+    if (importCoverage.examples.length < 20) {
+      importCoverage.examples.push({ file: site.file, line: site.line, spec: site.spec.slice(0, 160), status, reason });
+    } else importCoverage.examplesOmitted++;
+  };
 
   // Import edges (file-level, low conductance backbone) + tests wiring.
   const importTargets = new Map<string, ImportResolution[]>();
@@ -244,8 +306,34 @@ export const assembleGraphWithIndex = async (
     const f = facts(rel);
     if (!f) return;
     for (const imp of f.imports) {
+      importCoverage.sites++;
+      if (imp.dynamic) {
+        const family = resolveFamily(imp);
+        if (!family.files.length) {
+          importCoverage.unresolved++;
+          if (family.capped) importCoverage.capped++;
+          noteImport(imp, family.capped ? "capped" : "unresolved", family.reason!);
+          continue;
+        }
+        importCoverage.possible++;
+        noteImport(imp, "possible", `${family.files.length} literal-prefix/suffix targets; runtime values are not evaluated`);
+        for (const file of family.files) {
+          pushEdge(fileIdx.get(rel)!, fileIdx.get(file)!, "imports", 0.15 / family.files.length, {
+            strategy: "computed-import-family", rule: "literal-prefix-suffix", source: imp.spec,
+            candidates: family.files.length, possible: true,
+          });
+        }
+        // Possible targets must not become exact call-resolution or test edges.
+        continue;
+      }
       const target = resolveImportToFile(imp.spec, rel, importIndex);
-      if (!target || target.file === rel) continue;
+      if (!target) {
+        importCoverage.unresolved++;
+        noteImport(imp, "unresolved", "not resolved within the selected graph; may be external or outside the modeled import forms");
+        continue;
+      }
+      importCoverage.resolved++;
+      if (target.file === rel) continue;
       pushEdge(fileIdx.get(rel)!, fileIdx.get(target.file)!, "imports", 0.3, target.evidence);
       (importTargets.get(rel) ?? importTargets.set(rel, []).get(rel)!).push(target);
     }
@@ -384,5 +472,5 @@ export const assembleGraphWithIndex = async (
     }
   }
 
-  return { graph: { nodes, edges, byName, byFile, anchors, files }, joinIndex: joinIdx };
+  return { graph: { nodes, edges, byName, byFile, anchors, files, importCoverage }, joinIndex: joinIdx };
 };

@@ -66,7 +66,7 @@ export interface FileFacts {
   sigs?: FileSigs;
 }
 
-const CACHE_VERSION = 14; // v14: orpc/hono call shapes, proto keyword guard, graphql union/implements, protocol doc size cap
+const CACHE_VERSION = 15; // v15: literal dynamic imports and bounded computed import expressions
 
 // Honest coverage: what the extractor could NOT see. Tools and status render
 // this so a thin graph never reads as a small repo; omissions are explicit.

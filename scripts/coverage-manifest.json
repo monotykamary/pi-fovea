@@ -1,0 +1,201 @@
+{
+  "selection": "Prespecified purposive sample, not statistically representative. Whole checkouts except Prettier's src scope. No repository scripts or dependencies are executed.",
+  "repos": [
+    {
+      "repo": "expressjs/express",
+      "ecosystem": "JavaScript / Express",
+      "sha": "53d4a0d606c0388f764f192b306ce0e90200e7e8"
+    },
+    {
+      "repo": "fastify/fastify",
+      "ecosystem": "JavaScript / Fastify",
+      "sha": "d266f833f2bff34c6115c026e461b682e94d0b9c"
+    },
+    {
+      "repo": "honojs/hono",
+      "ecosystem": "TypeScript / Hono",
+      "sha": "90e1b948467961718afd3ae34af9dee582b42248"
+    },
+    {
+      "repo": "prettier/prettier",
+      "ecosystem": "JavaScript / Prettier",
+      "scope": "src",
+      "sha": "968c1a62c8dce7f72a4fed477b2a5b260f5f31cf"
+    },
+    {
+      "repo": "vitest-dev/vitest",
+      "ecosystem": "TypeScript / Vitest",
+      "sha": "2ce29d5fa758046e5453bd92b8ed6c9da9709bb5"
+    },
+    {
+      "repo": "unjs/h3",
+      "ecosystem": "TypeScript / H3",
+      "sha": "aa50e96a4a3da1732aa54542c498b37e0f8e3508"
+    },
+    {
+      "repo": "sveltejs/svelte",
+      "ecosystem": "JavaScript / Svelte",
+      "sha": "6eb720a1b7cafca3ebe0ab5c76674272cd3044f9"
+    },
+    {
+      "repo": "vuejs/core",
+      "ecosystem": "TypeScript / Vue",
+      "sha": "54097087a0918b98f16c84599b1a6d654e952ca7"
+    },
+    {
+      "repo": "pallets/flask",
+      "ecosystem": "Python / Flask",
+      "sha": "d73fa1cdcbd8b1465c151db8924ba58b1dd14e35"
+    },
+    {
+      "repo": "encode/starlette",
+      "ecosystem": "Python / Starlette",
+      "sha": "76fd00f1e293990ea41555946a6b0f58901eaca1"
+    },
+    {
+      "repo": "fastapi/fastapi",
+      "ecosystem": "Python / FastAPI",
+      "sha": "50113da16fec53b66b80d75e80a89296de4fa5a5"
+    },
+    {
+      "repo": "psf/requests",
+      "ecosystem": "Python / Requests",
+      "sha": "dae7ef63b4df6eded86637f251fc4e3a06c3b479"
+    },
+    {
+      "repo": "gin-gonic/gin",
+      "ecosystem": "Go / Gin",
+      "sha": "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9"
+    },
+    {
+      "repo": "go-chi/chi",
+      "ecosystem": "Go / Chi",
+      "sha": "b1c9ab47626cc46b34393ad4d35779c4363c4e1e"
+    },
+    {
+      "repo": "spf13/cobra",
+      "ecosystem": "Go / Cobra",
+      "sha": "adbc8813901bba65827259daa8e22ff94ec1f30e"
+    },
+    {
+      "repo": "tokio-rs/axum",
+      "ecosystem": "Rust / Axum",
+      "sha": "af1345b53a259b0990be1ff853f9b56c05040ef7"
+    },
+    {
+      "repo": "serde-rs/serde",
+      "ecosystem": "Rust / Serde",
+      "sha": "a874a1b1bb1cc16cf5ee3b1b7b527af5705742bb"
+    },
+    {
+      "repo": "clap-rs/clap",
+      "ecosystem": "Rust / Clap",
+      "sha": "48ed7869b91addcfb485decf2b445c74bef00535"
+    },
+    {
+      "repo": "javalin/javalin",
+      "ecosystem": "Java / Javalin",
+      "sha": "219f8c14dd20fb626735295f45673fdc24a4ab6f"
+    },
+    {
+      "repo": "google/gson",
+      "ecosystem": "Java / Gson",
+      "sha": "8b4b55051489132190cb8d1c61eb9dc7f5381295"
+    },
+    {
+      "repo": "square/okhttp",
+      "ecosystem": "Kotlin / OkHttp",
+      "sha": "1402451779106b1e6d3e78f629e1dbfb79317f21"
+    },
+    {
+      "repo": "sinatra/sinatra",
+      "ecosystem": "Ruby / Sinatra",
+      "sha": "cb22afd7902b566b6eaba6c4ea89739494a65d12"
+    },
+    {
+      "repo": "rack/rack",
+      "ecosystem": "Ruby / Rack",
+      "sha": "a9833c8f3bd6b6d1e0ab35de00a1f1a16b5095f5"
+    },
+    {
+      "repo": "slimphp/Slim",
+      "ecosystem": "PHP / Slim",
+      "sha": "3675bf6baac66b07032575b7bef4200b60b7974b"
+    },
+    {
+      "repo": "Seldaek/monolog",
+      "ecosystem": "PHP / Monolog",
+      "sha": "2dc40e8f3b76a0b657e0a25c932dc6edef215891"
+    },
+    {
+      "repo": "libuv/libuv",
+      "ecosystem": "C / libuv",
+      "sha": "096a02d14cb9d3de6d55a29ec02c4dfcb7643c7f"
+    },
+    {
+      "repo": "madler/zlib",
+      "ecosystem": "C / zlib",
+      "sha": "e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca"
+    },
+    {
+      "repo": "fmtlib/fmt",
+      "ecosystem": "C++ / fmt",
+      "sha": "e5d13d826f4266de65d2463dc3bff4ff3d25221e"
+    },
+    {
+      "repo": "gabime/spdlog",
+      "ecosystem": "C++ / spdlog",
+      "sha": "57cb5fb7a8ff30079751728234623230535a5c92"
+    },
+    {
+      "repo": "Alamofire/Alamofire",
+      "ecosystem": "Swift / Alamofire",
+      "sha": "bda9ed57d72988a3a2ada33d824583541f86eac6"
+    },
+    {
+      "repo": "elixir-plug/plug",
+      "ecosystem": "Elixir / Plug",
+      "sha": "73404f851852a00ffb2014be95d4598900fa77b8"
+    },
+    {
+      "repo": "lunarmodules/luafilesystem",
+      "ecosystem": "Lua / LuaFileSystem",
+      "sha": "146ab458e821cd7617892099fe8e6e399b46185c"
+    },
+    {
+      "repo": "scalameta/munit",
+      "ecosystem": "Scala / MUnit",
+      "sha": "12fd6db97f6e1dc790cdc6833a03103e1cf675c3"
+    },
+    {
+      "repo": "ninenines/cowboy",
+      "ecosystem": "Erlang / Cowboy",
+      "sha": "79e3fb02b31d47af6e69e8f3ba18fba291a3072a"
+    },
+    {
+      "repo": "JuliaIO/JSON.jl",
+      "ecosystem": "Julia / JSON.jl",
+      "sha": "766455e59847a1d17c18499eccc1bff0e9ce53ca"
+    },
+    {
+      "repo": "NancyFx/Nancy",
+      "ecosystem": "C# / Nancy",
+      "sha": "e523defb12f5ea3ec7b7129ed2b4aaf70aebed2f"
+    },
+    {
+      "repo": "haskell/aeson",
+      "ecosystem": "Haskell / Aeson",
+      "sha": "a2cc6a782a9d94141f52fee38d7a569a4d9c5a68"
+    },
+    {
+      "repo": "tidyverse/glue",
+      "ecosystem": "R / glue",
+      "sha": "da9c73f7a3de6a27f3103cb5bb2355820a4c3a6a"
+    },
+    {
+      "repo": "bats-core/bats-core",
+      "ecosystem": "Bash / Bats",
+      "sha": "c8cd3698ff6215169e48a0a80f05b43ed8701541"
+    }
+  ]
+}

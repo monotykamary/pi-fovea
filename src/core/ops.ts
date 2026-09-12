@@ -7,9 +7,9 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { diffHunks, prFiles, uncommittedFiles } from "./git.js";
-import { chebyshevVectors, chooseOrder, forwardHeat, heatField } from "./heat.js";
+import { chebyshevVectors, chooseOrder, extendChebyshevVectors, forwardHeat, heatField } from "./heat.js";
 import { formatNodeLocation, revealFoveated, revealGroups, tokenEstimate, type GroupLine, type RevealedNode } from "./render.js";
-import { clearSessionFocus, FOCUS_T0, getSession, observeSessionPaths, TK_ORDER } from "./session.js";
+import { clearSessionFocus, FOCUS_T0, getSession, observeSessionPaths } from "./session.js";
 import { detectBasins } from "./basins.js";
 import { classifyLiteral, normalizeLiteral } from "./join.js";
 import { isTestFile } from "./extract.js";
@@ -62,6 +62,11 @@ const extractionDetails = (state: RepoState): Record<string, unknown> => ({
     unreadableFiles: state.extraction.unreadable,
     oversizedFiles: state.extraction.oversized,
     generatedFiles: state.extraction.generated,
+    ...(state.graph.importCoverage ? { imports: {
+      ...state.graph.importCoverage,
+      unsupportedLanguages: [...state.graph.importCoverage.unsupportedLanguages],
+      examples: state.graph.importCoverage.examples.map((example) => ({ ...example })),
+    } } : {}),
   },
   // Legacy flat fields remain additive compatibility for tool consumers.
   extractionFailures: state.extraction.failed.length,
@@ -165,10 +170,21 @@ const diceSimilarity = (a: string, b: string): number => {
   return (2 * overlap) / (a.length + b.length - 2);
 };
 
-const symbolSimilarity = (query: string, node: NodeRec): number => {
-  const queryTerms = identifierTerms(query);
-  const candidateTerms = identifierTerms(shortSymbolName(node.name));
-  const candidateSet = new Set(candidateTerms);
+// Derived name data follows the node's lifetime, not a session or review ledger.
+// Check the name as well so mutable/synthetic NodeRec callers remain correct.
+const normalizedNames = new WeakMap<NodeRec, { name: string; terms: string[]; set: Set<string> }>();
+const normalizedName = (node: NodeRec) => {
+  let value = normalizedNames.get(node);
+  if (!value || value.name !== node.name) {
+    const terms = identifierTerms(shortSymbolName(node.name));
+    value = { name: node.name, terms, set: new Set(terms) };
+    normalizedNames.set(node, value);
+  }
+  return value;
+};
+
+const symbolSimilarity = (queryTerms: readonly string[], node: NodeRec): number => {
+  const { terms: candidateTerms, set: candidateSet } = normalizedName(node);
   const shared = queryTerms.filter((term) => candidateSet.has(term)).length;
   const coverage = queryTerms.length ? shared / queryTerms.length : 0;
   const precision = candidateTerms.length ? shared / candidateTerms.length : 0;
@@ -177,31 +193,32 @@ const symbolSimilarity = (query: string, node: NodeRec): number => {
   return Math.max(tokenScore, charScore);
 };
 
-const sameIdentifierTerms = (query: string, name: string): boolean => {
-  const queryTerms = identifierTerms(query);
-  const candidateTerms = identifierTerms(shortSymbolName(name));
+const sameIdentifierTerms = (queryTerms: readonly string[], node: NodeRec): boolean => {
+  const { terms: candidateTerms, set: candidateSet } = normalizedName(node);
   if (!queryTerms.length || queryTerms.length !== candidateTerms.length) return false;
-  const candidateSet = new Set(candidateTerms);
   return queryTerms.every((term) => candidateSet.has(term));
 };
 
-const matchesFocusScope = (node: NodeRec, options: FocusOptions): boolean => {
+const focusScope = (options: FocusOptions): ((node: NodeRec) => boolean) => {
   const pathScope = options.path?.replace(/^@/, "").replace(/^\.\//, "").replace(/\/$/, "");
-  if (pathScope && node.file !== pathScope && !node.file.startsWith(`${pathScope}/`)) return false;
-  if (options.language && node.lang.toLowerCase() !== options.language.toLowerCase()) return false;
-  if (options.kind && node.kind !== options.kind) return false;
-  return true;
+  const language = options.language?.toLowerCase();
+  const kind = options.kind;
+  return (node) => (!pathScope || node.file === pathScope || node.file.startsWith(`${pathScope}/`)) &&
+    (!language || node.lang.toLowerCase() === language) && (!kind || node.kind === kind);
 };
 
 export const resolveSeeds = (state: RepoState, query: string, options: FocusOptions = {}): SeedResolution => {
   const g = state.graph;
-  const allows = (idx: number): boolean => matchesFocusScope(g.nodes[idx]!, options);
+  const matches = focusScope(options);
+  const allows = (idx: number): boolean => matches(g.nodes[idx]!);
   const scored = new Map<number, number>();
   const bump = (idx: number, s: number): void => {
     if (!allows(idx)) return;
     scored.set(idx, Math.max(scored.get(idx) ?? 0, s));
   };
   const q = query.trim();
+  let normalizedQuery: string[] | undefined;
+  const queryTerms = () => normalizedQuery ??= identifierTerms(q);
   const terms = q.split(/\s+/).filter((t) => t.length > 1);
 
   // Full feature ids are exact seeds for routes and non-HTTP protocols alike.
@@ -262,7 +279,7 @@ export const resolveSeeds = (state: RepoState, query: string, options: FocusOpti
   }
   if (scored.size === 0) {
     g.nodes.forEach((node, i) => {
-      if (node.kind !== "file" && node.kind !== "anchor" && sameIdentifierTerms(q, node.name)) {
+      if (node.kind !== "file" && node.kind !== "anchor" && sameIdentifierTerms(queryTerms(), node)) {
         bump(i, 0.7);
       }
     });
@@ -286,8 +303,11 @@ export const resolveSeeds = (state: RepoState, query: string, options: FocusOpti
   const suggestions = seeds.length
     ? []
     : g.nodes
-      .map((node, index) => ({ node, index, score: symbolSimilarity(q, node) }))
-      .filter(({ node, index, score }) => allows(index) && node.kind !== "file" && node.kind !== "anchor" && score >= 0.34)
+      .flatMap((node, index) => {
+        if (!allows(index) || node.kind === "file" || node.kind === "anchor") return [];
+        const score = symbolSimilarity(queryTerms(), node);
+        return score >= 0.34 ? [{ node, index, score }] : [];
+      })
       .sort((a, b) => b.score - a.score || a.node.name.localeCompare(b.node.name) || a.node.file.localeCompare(b.node.file))
       .slice(0, 5)
       .map(({ node, index, score }) => ({
@@ -402,7 +422,7 @@ export const sketch = async (root: string, budget?: number): Promise<OpResult> =
   const seeds = [...new Set([...productionAnchorIdx, ...fallbackHubIdx])].slice(0, 64);
   const s = seedVector(g.nodes.length, seeds);
   const t = 16;
-  const field = heatField(chebyshevVectors(state.csr, s, Math.max(TK_ORDER, chooseOrder(t))), t, g.nodes.length);
+  const field = heatField(chebyshevVectors(state.csr, s, chooseOrder(t)), t, g.nodes.length);
   let vmax = 0;
   for (let i = 0; i < field.length; i++) if (field[i]! > vmax) vmax = field[i]!;
   if (vmax <= 0) {
@@ -590,7 +610,7 @@ export const focus = async (
   }
   session.generation = state.generation;
   if (session.tkKey !== key) {
-    session.tk = chebyshevVectors(state.csr, seedVector(g.nodes.length, seeds), TK_ORDER);
+    session.tk = chebyshevVectors(state.csr, seedVector(g.nodes.length, seeds), chooseOrder(session.t));
     session.tkKey = key;
   }
   session.seeds = seeds;
@@ -598,7 +618,7 @@ export const focus = async (
   const t = session.t;
   const field = heatField(session.tk, t, g.nodes.length);
   const scopedIds = options.path || options.language || options.kind
-    ? new Set(g.nodes.filter((node) => matchesFocusScope(node, options)).map((node) => node.id))
+    ? new Set(g.nodes.filter(focusScope(options)).map((node) => node.id))
     : undefined;
   const fit = revealFoveated(g, field, {
     header: `fovea focus "${query}" · ${note}${extractionSuffix(state)}`,
@@ -619,6 +639,9 @@ export const focus = async (
       lit: fit.litTotal,
       shown: fit.shown,
       suppressed: fit.suppressed,
+      candidateOmitted: fit.candidateOmitted,
+      truncated: fit.truncated,
+      overflowPath: fit.overflowPath,
       t,
       scope: { path: options.path, language: options.language, kind: options.kind },
       requestedCoverage,
@@ -651,16 +674,14 @@ export const dwell = async (root: string, factor?: number, budget?: number): Pro
   const from = session.t;
   const to = Math.min(64, from * Math.max(1.2, factor ?? 2));
   session.t = to;
-  // The cached T_k(M)s vectors are exact for t up to ~TK_ORDER/2.2-16; beyond
-  // that, extend the recurrence instead of silently degrading accuracy.
+  // Materialize wider orders only when asked; keep the exact prefix and its key.
   if (chooseOrder(to) > session.tk.length - 1) {
-    session.tk = chebyshevVectors(state.csr, seedVector(g.nodes.length, session.seeds), chooseOrder(to) + 8);
-    session.tkKey += "+ext";
+    extendChebyshevVectors(state.csr, session.tk, chooseOrder(to) + 8);
   }
   const field = heatField(session.tk, to, g.nodes.length);
   const scope = session.scope ?? {};
   const scopedIds = scope.path || scope.language || scope.kind
-    ? new Set(g.nodes.filter((node) => matchesFocusScope(node, scope)).map((node) => node.id))
+    ? new Set(g.nodes.filter(focusScope(scope)).map((node) => node.id))
     : undefined;
   const fit = revealFoveated(g, field, {
     header: `fovea dwell · context widened ${Number((to / from).toFixed(1))}× · new results${extractionSuffix(state)}`,
@@ -681,6 +702,9 @@ export const dwell = async (root: string, factor?: number, budget?: number): Pro
       lit: fit.litTotal,
       shown: fit.shown,
       suppressed: fit.suppressed,
+      candidateOmitted: fit.candidateOmitted,
+      truncated: fit.truncated,
+      overflowPath: fit.overflowPath,
       scope,
       nodes: fit.revealed,
       suggestedReads: suggestedReads(fit.revealed),
@@ -898,7 +922,8 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
   const noteNode = (node: number, reasons: string[]): void => {
     if (!reasonByNode.has(node) && reasons.length) reasonByNode.set(node, reasons);
   };
-  const reasonFor = (kind: Graph["edges"][number]["kind"]): string | undefined => {
+  const reasonFor = (kind: Graph["edges"][number]["kind"], evidence?: EdgeEvidence): string | undefined => {
+    if (kind === "imports" && evidence?.possible) return "possible import target";
     switch (kind) {
       case "invokes": return "call dependency";
       case "imports": return "import dependency";
@@ -918,7 +943,7 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
       : seedFiles.has(bFile) && !seedFiles.has(aFile)
         ? aFile
         : undefined;
-    const reason = reasonFor(edge.kind);
+    const reason = reasonFor(edge.kind, edge.evidence);
     if (!reason) continue;
     // 1-hop: the non-seed endpoint inherits the channel directly.
     const farNode = seedFiles.has(aFile) && !seedFiles.has(bFile) ? edge.b
@@ -942,7 +967,7 @@ export const impact = async (root: string, args: ImpactArgs, ensured?: RepoState
     for (const edge of state.adjacency.get(current.node) ?? []) {
       if (visited.has(edge.to)) continue;
       visited.add(edge.to);
-      const reason = reasonFor(edge.kind as Graph["edges"][number]["kind"]);
+      const reason = reasonFor(edge.kind as Graph["edges"][number]["kind"], edge.evidence);
       const reasons = reason && !current.reasons.includes(reason)
         ? [...current.reasons, reason]
         : current.reasons;

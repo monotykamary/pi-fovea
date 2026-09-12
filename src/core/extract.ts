@@ -317,7 +317,8 @@ const IMPORT_PATTERNS: Record<string, string[]> = {
     "export { $$$I } from '$M'",
     'export * from "$M"',
     "export * from '$M'",
-    'require("$M")',
+    "require($EXPR)",
+    "import($EXPR)",
   ],
   Go: ['import "$M"', 'import ( $$$S )'],
   Python: ["import $M", "from $M import $$$I"],
@@ -326,9 +327,46 @@ const IMPORT_PATTERNS: Record<string, string[]> = {
 IMPORT_PATTERNS.JavaScript = IMPORT_PATTERNS.TypeScript!;
 IMPORT_PATTERNS.Tsx = IMPORT_PATTERNS.TypeScript!;
 
+export const supportsImportExtraction = (language: string): boolean => !!IMPORT_PATTERNS[language]?.length;
+
+// Only literal paths and one-hole expressions are modeled. Never evaluate code
+// or interpret arbitrary expressions as a static module specifier.
+const importExpression = (raw: string): Pick<ImportSite, "spec" | "dynamic"> => {
+  const expression = raw.trim();
+  const literal = (text: string): string | undefined => {
+    const match = /^(['"`])([^\\\r\n]*)\1$/.exec(text.trim());
+    if (!match || match[2]!.includes(match[1]!) || (match[1] === "`" && match[2]!.includes("${"))) return undefined;
+    return match[2];
+  };
+  const value = literal(expression);
+  if (value !== undefined) return { spec: value };
+  const unknown = { spec: expression, dynamic: {} };
+  if (expression.length > 1024) return unknown;
+  const identifier = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/;
+  const template = /^`([^`\\$]*)\$\{([^{}]+)\}([^`\\$]*)`$/.exec(expression);
+  if (template && identifier.test(template[2]!.trim())) {
+    return { spec: expression, dynamic: { prefix: template[1]!, suffix: template[3]! } };
+  }
+  const head = /^(['"])([^\\'"\r\n]*)\1\s*\+\s*/.exec(expression);
+  if (head) {
+    const rest = expression.slice(head[0].length);
+    if (identifier.test(rest)) return { spec: expression, dynamic: { prefix: head[2]!, suffix: "" } };
+    const plus = rest.indexOf("+");
+    if (plus >= 0 && identifier.test(rest.slice(0, plus).trim())) {
+      const suffix = literal(rest.slice(plus + 1));
+      if (suffix !== undefined) return { spec: expression, dynamic: { prefix: head[2]!, suffix } };
+    }
+  }
+  return unknown;
+};
+
 const importsFromMatches = (matches: readonly AgMatch[]): ImportSite[] => {
   const out: ImportSite[] = [];
   for (const m of matches) {
+    if (m.single.EXPR !== undefined) {
+      out.push({ file: m.file, line: m.line, ...importExpression(m.single.EXPR) });
+      continue;
+    }
     const spec = m.single.M;
     if (spec) {
       out.push({ file: m.file, spec, line: m.line });

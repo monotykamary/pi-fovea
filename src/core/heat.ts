@@ -131,17 +131,18 @@ const heatCoeff = (k: number, t: number): number => {
 
 // Chebyshev evaluation vectors: tk[k] = T_k(M) s. Cache these in the session
 // and every later dwell-for-a-new-t costs O(K*n), not O(K*nnz).
-export const chebyshevVectors = (csr: Csr, s: Float64Array, K: number): Float64Array[] => {
-  const tk: Float64Array[] = new Array(K + 1);
-  tk[0] = Float64Array.from(s);
-  // Invocation-local normalization preserves compatibility with mutable/synthetic CSR
-  // callers without adding a persistent cache or a new invalidation boundary.
-  if (K === 0) return tk;
+export const chebyshevVectors = (csr: Csr, s: Float64Array, K: number): Float64Array[] =>
+  extendChebyshevVectors(csr, [Float64Array.from(s)], K);
+
+// Append only missing orders. The caller owns the seed/operator generation;
+// existing vectors are never overwritten, and normalization stays invocation-local.
+export const extendChebyshevVectors = (csr: Csr, tk: Float64Array[], K: number): Float64Array[] => {
+  if (!tk.length) throw new Error("Cannot extend an empty Chebyshev basis");
+  if (tk.length > K) return tk;
   const invSqrt = inverseDegrees(csr);
-  if (K >= 1) tk[1] = applyNegP(csr, tk[0]!, invSqrt);
-  for (let k = 2; k <= K; k++) {
-    const prev = tk[k - 1]!;
-    const out = applyNegP(csr, prev, invSqrt);
+  if (tk.length === 1) tk[1] = applyNegP(csr, tk[0]!, invSqrt);
+  for (let k = tk.length; k <= K; k++) {
+    const out = applyNegP(csr, tk[k - 1]!, invSqrt);
     const p2 = tk[k - 2]!;
     for (let i = 0; i < csr.n; i++) out[i] = 2 * out[i]! - p2[i]!;
     tk[k] = out;

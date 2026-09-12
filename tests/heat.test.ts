@@ -3,7 +3,7 @@
 // (heat-kernel positivity, Bessel values).
 
 import { describe, expect, it } from "vitest";
-import { besselI, buildCsr, chebyshevVectors, heatField, heatAt, taylorReference, type Csr } from "../src/core/heat.js";
+import { besselI, buildCsr, chebyshevVectors, chooseOrder, extendChebyshevVectors, heatField, heatAt, taylorReference, type Csr } from "../src/core/heat.js";
 import type { Graph, NodeRec } from "../src/core/types.js";
 
 const mulberry32 = (seed: number) => () => {
@@ -54,6 +54,33 @@ const legacyVectors = (csr: Csr, s: Float64Array, K: number): Float64Array[] => 
 };
 
 describe("heat diffusion", () => {
+  it("extends only missing orders and preserves exact recurrence prefixes", () => {
+    for (const [n, p] of [[0, 0], [1, 0], [25, 0.2]]) {
+      const csr = buildCsr(randomGraph(n!, p!, 7));
+      const seed = Float64Array.from({ length: csr.n }, (_, i) => i % 2 ? 0 : 1);
+      const basis = chebyshevVectors(csr, seed, 0);
+      for (const order of [3, 21, 42, 98]) {
+        const prefix = [...basis];
+        expect(extendChebyshevVectors(csr, basis, order)).toBe(basis);
+        prefix.forEach((vector, i) => expect(basis[i]).toBe(vector));
+        expect(basis).toEqual(legacyVectors(csr, seed, order));
+      }
+      expect(extendChebyshevVectors(csr, basis, 2)).toBe(basis);
+      expect(basis).toHaveLength(99);
+    }
+    expect(() => extendChebyshevVectors(buildCsr(randomGraph(0, 0, 1)), [], 2)).toThrow("empty Chebyshev basis");
+  });
+
+  it("demand-driven orders produce exactly the former eager heat fields", () => {
+    const csr = buildCsr(randomGraph(36, 0.2, 9));
+    const seed = Float64Array.from({ length: csr.n }, (_, i) => i === 2 ? 1 : 0);
+    const full = chebyshevVectors(csr, seed, 98);
+    for (const t of [0, 0.01, 0.5, 1.2, 2, 4, 8, 16, 24, 28, 32, 48, 64]) {
+      expect(heatField(full.slice(0, chooseOrder(t) + 1), t, csr.n)).toEqual(heatField(full, t, csr.n));
+    }
+  });
+
+
   it("preserves every recurrence vector exactly, including empty and disconnected graphs", () => {
     for (const [n, p] of [[0, 0], [1, 0], [15, 0], [60, 0.08], [25, 1]]) {
       const csr = buildCsr(randomGraph(n!, p!, 42));

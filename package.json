@@ -55,6 +55,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "bench": "tsx scripts/bench.ts",
+    "corpus:coverage": "bun scripts/coverage-corpus.mjs",
+    "corpus:performance": "bun scripts/performance-corpus.mjs",
     "build:cli": "tsx scripts/build-cli.ts",
     "prepack": "bun run build:cli",
     "fovea": "tsx cli.ts",

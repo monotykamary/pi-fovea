@@ -12,7 +12,7 @@ The repo compiles into one typed undirected graph $G = (V, E)$. Nodes are files,
 | `inherits` class → parent | $0.9$ |
 | `tests` test file → subject | $0.6$ |
 | `invokes` caller → callee | see below |
-| `imports` file → file | $0.3$ |
+| `imports` file → file | $0.3$ exact; $0.15/n$ per possible family target |
 | `anchors` anchor hub → handler | $c / \sqrt{S}$ |
 | `anchors` hub → member file | $0.35 / \sqrt{\|F\|}$ |
 | `join` literal bridge | see below |
@@ -20,6 +20,10 @@ The repo compiles into one typed undirected graph $G = (V, E)$. Nodes are files,
 Call edges are specificity-tiered, so a call to a rare symbol beats one to a common symbol. Builtins and log or test entry points are warded off. A `console.log` call connects nothing. The anchor hub weight decays with the number of sites $S$ bound to it, so a multi-site route never becomes a gravity well. File-member weights decay with $|F|$, the file count of the feature hood.
 
 Anchor labels are normalized so one route shows up once. Every placeholder syntax, such as `{id}`, `:id`, `${id}`, or `$code`, becomes `{*}` before hub assignment. Ktor's `${code}` shorthand and the Rails `:id` form land in one cluster.
+
+Computed JS/TS imports can contribute a finite **possible** path family to this same graph. One relative literal prefix/suffix expression connects at most $n=32$ selected files with total conductance at most $0.15$ per captured site. The resolver examines at most 4,096 prefix matches and refuses an over-limit family rather than silently selecting a subset. Edge evidence records `possible: true`, the expression, candidate count, and resolution rule. These edges are not promoted into exact call/test relationships. Unknown expressions and missing import readers are reported in current graph coverage details; no review state is introduced.
+
+These are candidate priors, not runtime guarantees or calibrated probabilities. A variable can traverse out of the literal prefix or target a generated/external module. Absolute conductance also does not guarantee a uniformly weaker normalized response: normalization depends on the other incident edges. The heat operator itself is unchanged.
 
 ## The heat kernel
 
@@ -49,7 +53,7 @@ $$
 T_0(M)s = s, \qquad T_k(M)s = 2 M \left(T_{k-1}(M)s\right) - T_{k-2}(M)s \quad (k \ge 2)
 $$
 
-and are cached per session. A new timescale recombines coefficients for $O(K \cdot n)$ work, so no second walk runs. The order $K$ grows with $\lceil 2.2 t \rceil + 16$ and tops out at 90. Measured error against a scaling-and-squaring Taylor reference lands at $\sim 6 \times 10^{-9}$.
+and are cached per session. When the basis already covers a requested timescale, recombining coefficients costs $O(K \cdot n)$. Otherwise, dwell appends only the missing recurrence vectors, preserving the existing prefix and its graph-generation key. Sharp focus at $t=2$ starts with 22 vectors instead of eagerly allocating 81; sketch also uses its required order. The requested order grows with $\lceil 2.2 t \rceil + 16$ and caps at 90; dwell can retain eight extra orders of headroom. This changes when work happens, not the heat operator: regression tests require exact recurrence and field parity. Measured error against a scaling-and-squaring Taylor reference lands at $\sim 6 \times 10^{-9}$.
 
 No Jackson damping window is applied. The SGWT wavelet frame applies windows because its compactly supported bumps ring at the support edge. $e^{-t(1+\mu)}$ is smooth on $[-1,1]$ and truncation decays superalgebraically, so a Jackson window here would only cut pointwise accuracy. `src/core/heat.ts` carries the check.
 
@@ -65,6 +69,8 @@ All four tools call the same kernel with different seeds at different timescales
 | impact | changed files | $4$ |
 
 The renderer reads $v(t)$ and normalizes by $v_{\max}$. A node above $0.3 v_{\max}$ prints its signature. Between $0.02$ and $0.3 v_{\max}$ it becomes a one-liner, and everything lower collapses into per-file counts. Typed one-hop neighbors lead the anonymous thermal periphery. Unrelated warm nodes are capped per file, while sketch demotes test and fixture scopes in presentation only. The graph and heat field stay unchanged. A binary search over the fixed candidate order still yields a monotonic prefix, and that prefix never exceeds the token budget.
+
+The 400-candidate display cap applies after eligibility, not to the recoverable set. `litTotal` counts all eligible nodes and `candidateOmitted` counts the portion beyond that cap. A writable overflow artifact enumerates every eligible node individually, including the omitted tail and collapsed periphery. Filters, disclosure suppression, and the heat cutoff still define eligibility. If writing fails, truncation remains explicit without a fictitious artifact path. This makes the output boundary accountable; it does not make the graph semantically complete.
 
 Disclosure is scoped to the current seed set. Repeated focus keeps the seed and direct nucleus visible while suppressing what you have seen. Dwell returns newly relevant neighbors. Changing focus resets to $t=2$ and clears the disclosure scope. `fresh` does the same explicitly for reproducibility.
 

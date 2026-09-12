@@ -173,6 +173,52 @@ describe("revealFoveated", () => {
 });
 
 describe("overflow artifacts", () => {
+  it("keeps every eligible node in overflow even when the display cap alone truncates", () => {
+    const g = fanGraph(150);
+    const field = new Float64Array(g.nodes.length).fill(1);
+    const path = join(tmpdir(), "pi-fovea-test-candidate-cap.txt");
+    const fit = revealFoveated(g, field, { header: "all", budget: 16000, overflowTo: path });
+    expect(fit.litTotal).toBe(g.nodes.length);
+    expect(fit.candidateOmitted).toBe(g.nodes.length - 400);
+    expect(fit.truncated).toBe(true);
+    expect(fit.tokens).toBeLessThanOrEqual(16000);
+    const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+    expect(lines).toHaveLength(g.nodes.length + 1);
+    expect(lines.join("\n")).toContain("helper2Mod149");
+  });
+
+  it("reports cap loss even without a writable artifact, including a zero display cap", () => {
+    const g = fanGraph(3);
+    const fit = revealFoveated(g, new Float64Array(g.nodes.length).fill(1), {
+      header: "all", budget: 256, maxCandidates: 0,
+      overflowTo: join(tmpdir(), "pi-fovea-no-such-directory", "overflow.txt"),
+    });
+    expect(fit.litTotal).toBe(g.nodes.length);
+    expect(fit.candidateOmitted).toBe(g.nodes.length);
+    expect(fit.truncated).toBe(true);
+    expect(fit.overflowPath).toBeUndefined();
+    expect(fit.text).toContain(`${g.nodes.length} more results`);
+    expect(fit.text).not.toContain("full list saved");
+    expect(fit.tokens).toBeLessThanOrEqual(256);
+  });
+
+  it("keeps scope, exclusions, and disclosure filtering ahead of complete overflow", () => {
+    const g = fanGraph(3);
+    const include = new Set(g.nodes.slice(0, 8).map((node) => node.id));
+    const excluded = g.nodes[2]!.id;
+    const disclosed = g.nodes[3]!.id;
+    const path = join(tmpdir(), "pi-fovea-test-filtered-cap.txt");
+    const fit = revealFoveated(g, new Float64Array(g.nodes.length).fill(1), {
+      header: "filtered", budget: 256, maxCandidates: 1, overflowTo: path,
+      include, exclude: new Set([excluded]), disclosed: new Set([disclosed]),
+    });
+    expect(fit.litTotal).toBe(6);
+    expect(fit.candidateOmitted).toBe(5);
+    expect(readFileSync(path, "utf8").trimEnd().split("\n")).toHaveLength(7);
+    expect(fit.suppressed).toBe(1);
+  });
+
+
   it("spills the full foveated list to a tmp file and names it in the footer", () => {
     const g = fanGraph(90);
     const csr = buildCsr(g);
