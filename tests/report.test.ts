@@ -5,7 +5,7 @@
 // broken extraction.
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -52,7 +52,9 @@ const scanlessAstGrep = (): string => {
 const countingAstGrep = (log: string): string => {
   const dir = mkdtempSync(join(tmpdir(), "fovea-counting-sg-"));
   const bin = join(dir, "sg-count");
-  writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\nif [ "$1" = "--version" ]; then echo "sg-count 0.0.0"; exit 0; fi\nif [ "$1" = "scan" ] && [ "$2" = "--help" ]; then exit 0; fi\nif [ "$1" = "scan" ]; then exit 0; fi\nif [ "$1" = "outline" ] && [ "$2" = "--json=compact" ]; then printf '[]'; exit 0; fi\nif [ "$1" = "outline" ]; then exit 0; fi\nexit 2\n`);
+  // Concurrent shell printf calls can interleave even with append redirection.
+  // Keep each subprocess record separate so the scheduling count stays exact.
+  writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$*" > "${log}.$$"\nif [ "$1" = "--version" ]; then echo "sg-count 0.0.0"; exit 0; fi\nif [ "$1" = "scan" ] && [ "$2" = "--help" ]; then exit 0; fi\nif [ "$1" = "scan" ]; then exit 0; fi\nif [ "$1" = "outline" ] && [ "$2" = "--json=compact" ]; then printf '[]'; exit 0; fi\nif [ "$1" = "outline" ]; then exit 0; fi\nexit 2\n`);
   chmodSync(bin, 0o755);
   return bin;
 };
@@ -164,7 +166,9 @@ describe("consolidated extraction scheduling", () => {
       vi.stubEnv("FOVEA_AST_GREP", countingAstGrep(log));
       const outcome = await loadFacts(root, await listFiles(root));
       expect(outcome.report.failed).toEqual([]);
-      const invocations = readFileSync(log, "utf8").trim().split("\n");
+      const invocations = readdirSync(root)
+        .filter((name) => name.startsWith("invocations.log."))
+        .map((name) => readFileSync(join(root, name), "utf8").trim());
       expect(invocations.filter((line) => line.startsWith("scan --rule "))).toHaveLength(2);
       expect(invocations.filter((line) => line.startsWith("outline "))).toHaveLength(4);
     } finally {
