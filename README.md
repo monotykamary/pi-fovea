@@ -520,6 +520,12 @@ special case of this field. [docs/heat-diffusion.md](docs/heat-diffusion.md)
 walks through conductance tiers, specificity bridges, hub gravity, and inferred
 regions.
 
+## Snapshot substrate API
+
+`pi-fovea/substrate` exposes a versioned, session-free graph and heat interface for
+consumers such as pi-contour. It assembles caller-supplied immutable facts without
+discovering files or reading a live worktree. See [docs/substrate.md](docs/substrate.md).
+
 ## Languages
 
 Full symbol and call extraction: **TypeScript, TSX, JavaScript, Python, Go, and Rust**.

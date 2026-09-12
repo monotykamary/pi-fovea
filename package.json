@@ -1,6 +1,6 @@
 {
   "name": "pi-fovea",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "description": "Token-budgeted repo mapping for agent sessions: foveated heat diffusion over a cross-language code graph, with progressive disclosure.",
   "type": "module",
   "license": "MIT",
@@ -34,10 +34,12 @@
     "image": "https://raw.githubusercontent.com/monotykamary/pi-fovea/main/media/cover.svg"
   },
   "exports": {
-    "./ops": "./src/core/ops.ts"
+    "./ops": "./src/core/ops.ts",
+    "./substrate": "./src/substrate.ts"
   },
   "files": [
     "src",
+    "docs/substrate.md",
     "cli.ts",
     "dist",
     "skills",
