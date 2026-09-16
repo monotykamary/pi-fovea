@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The affected-test selection diffs the push range or the pull-request
+          # base, so that base commit has to be present in history.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
@@ -17,7 +21,20 @@ jobs:
       - name: ast-grep
         run: npm i -g @ast-grep/cli@0.45.3
       - run: bun install --frozen-lockfile
-      - run: bun run check
+      - name: Type check
+        run: bun run typecheck
+      - name: Affected tests
+        env:
+          # Pull requests compare against the target branch; pushes compare
+          # against the tip they replaced. An unusable base selects nothing.
+          PI_TEST_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bun run test:affected
+      - name: Pipeline smoke floor
+        # Curated scan-to-render floor (about three seconds) so a push the
+        # selection did not cover still exercises the pipeline.
+        run: bun run test:smoke
+      - name: Dead code
+        run: bun run lint:dead
       - name: CLI bundle smoke (the global install artifact)
         run: |
           bun run build:cli
