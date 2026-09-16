@@ -528,7 +528,8 @@ Exact contract topology: **Protocol Buffers (`.proto`) and GraphQL (`.graphql`, 
 
 ```sh
 bun install
-bun run check        # typecheck + full vitest suite + knip
+bun run check:fast   # typecheck + tests your working tree affects
+bun run test:smoke   # curated scan-to-render floor, seconds
 bun run bench        # rate–distortion and refresh bench against ../pi-fabric
 bun run bench tests/fixtures/mini  # self-contained smoke run
 ```
@@ -551,7 +552,7 @@ disk-warm target builds are single samples; three-sample refresh p95s are only
 smoke diagnostics. The outline gets no more tokens than Fovea actually used.
 `fidelity@16k` measures disclosed node IDs against a finite larger Fovea response,
 **not independently labeled relevance**. Timing results are informational, never
-a flaky CI gate; deterministic equivalence tests run in `bun run check`.
+a flaky CI gate; deterministic equivalence tests run in the change-scoped selection (`bun run test:changed`).
 The bench clears the target's disposable facts cache to measure cold loading,
 but edits only temporary fixture copies.
 

@@ -18,7 +18,7 @@ The benchmark requires identical ordered warm graphs including weights and evide
 
 Independent cold extraction exposed pre-existing capture-order variability, including different literal-join locations for repeated literals. The extractor/join implementation is unchanged here. Therefore these measurements deliberately concern the warm runtime path and make no cold-extraction speedup or reproducibility claim. Uniform-render timings and cached-state construction were not consistently better; retain the raw phase measurements rather than attributing every timing difference to the optimization.
 
-`bun run check` passes 235 tests plus typecheck and knip. The optimized candidate also passes the 39-repository coverage gate: 17,768 selected files represented, 275 disclosure probes with zero candidate loss, and no existing exact imports lost. See [coverage-corpus.md](coverage-corpus.md).
+The full suite passes 235 tests plus typecheck and knip. The optimized candidate also passes the 39-repository coverage gate: 17,768 selected files represented, 275 disclosure probes with zero candidate loss, and no existing exact imports lost. See [coverage-corpus.md](coverage-corpus.md).
 
 ## Reproduction
 
