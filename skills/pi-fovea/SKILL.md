@@ -27,8 +27,9 @@ All four accept `maxTokens` (256–16000). Budget is roughly 4 chars per token.
 
 Successful native/Fabric `pi.*` path access automatically selects the containing
 project, including disjoint repositories outside cwd. A neutral launch directory
-is not implicitly indexed. Omitted analysis roots use the most recent selection;
-parallel callers should specify `root` explicitly. Explicit Fovea roots remain
+is not implicitly indexed. Omitted analysis roots use the session cwd's own
+project (nearest `.git` or manifest, else the cwd), never the most recent
+selection; parallel callers should specify `root` explicitly. Explicit Fovea roots remain
 exact directory scopes, resolved relative to `ctx.cwd`. Symlink aliases unify;
 linked Git worktrees do not. Results expose root, origin, and workspace details.
 

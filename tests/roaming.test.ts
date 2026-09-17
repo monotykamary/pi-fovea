@@ -70,12 +70,14 @@ describe.skipIf(!hasAstGrep())("roaming observation", () => {
       expect(h.entries.at(-1).data.roots).not.toContain(origin);
       h.api.events.emit(WORKSPACE_ACCESS_EVENT,{version:1,source:"contour",root:roots[1],sessionId:"roaming-test"});
       const peer=await h.tools.get("fovea_sketch").execute("peer",{maxTokens:256},new AbortController().signal,undefined,h.ctx);
-      expect(peer.details.root).toBe(roots[1]);
+      // A manual call answers about the cwd (this coordinator), while the peer
+      // hint only enrolls the sibling in the observed ring.
+      expect(peer.details.root).toBe(origin); expect(peer.details.observedRoots).toContain(roots[1]);
       await h.emit("session_compact"); const checkpoint=h.entries.at(-1).data;
       await h.emit("session_shutdown"); await h.emit("session_start");
       expect(syncBaselineStore().size).toBe(0);
       const result=await h.tools.get("fovea_sketch").execute("restored",{maxTokens:256},new AbortController().signal,undefined,h.ctx);
-      expect(result.details.root).toBe(checkpoint.roots.at(-1)); expect(result.details.workspace.capacity).toBe(32);
+      expect(result.details.root).toBe(origin); expect(result.details.observedRoots).toContain(checkpoint.roots.at(-1)!); expect(result.details.workspace.capacity).toBe(32);
     } finally { await h.emit("session_shutdown"); for(const root of roots)evictState(root); rmSync(origin,{recursive:true,force:true});rmSync(elsewhere,{recursive:true,force:true}); }
   },60_000);
 

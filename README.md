@@ -166,16 +166,21 @@ explicit observation gap, never a clean verdict. Re-entry baselines anew.
 
 ```ts
 await pi.read({ path: "/projects/service/src/handler.ts", offset: 1, limit: 40 });
-await extensions.fovea_focus({ query: "src/handler.ts", maxTokens: 1024 });
-// An explicit root still selects an exact directory, including umbrella scopes.
+// Access alone enrolls the project; an unrooted call still answers about cwd.
+await extensions.fovea_focus({ root: "/projects/service", query: "src/handler.ts", maxTokens: 1024 });
+// An explicit root selects any exact directory, including umbrella scopes.
 await extensions.fovea_focus({ root: "../other", query: "entry", maxTokens: 512 });
 ```
 
-- Omitted analysis roots use the last selected project. Explicit `root` resolves
-  against **the tool context's cwd**, not process cwd or the previous root.
-  Parallel coordinators should supply it. Native paths remain cwd-relative;
-  neither Fovea nor Contour changes cwd. Results carry `details.root`,
-  `observedRoots`, `workspace` (capacity/retirements), and `agentOrigin`.
+- Omitted analysis roots use the session cwd's own project—the nearest `.git` or
+  manifest, else the cwd itself—never the last selected project, so an unrooted
+  call cannot answer about a sibling repository. Contour keeps the recency ring
+  as a fallback for a coordinator cwd, where a review needs a Git worktree.
+  Explicit `root` resolves against **the tool context's cwd**, not process cwd
+  or the previous root. Parallel coordinators should supply it. Native paths
+  remain cwd-relative; neither Fovea nor Contour changes cwd. Results carry
+  `details.root`, `observedRoots`, `workspace` (capacity/retirements), and
+  `agentOrigin`.
 - Enrollment happens after success, not before permission checks. Failed or
   blocked calls enroll nothing. Automatic discovery excludes broad/system,
   private, dependency, and generated locations. It does not parse arbitrary
@@ -193,15 +198,15 @@ await extensions.fovea_focus({ root: "../other", query: "entry", maxTokens: 512 
   opaque shell edits; hintless changes in enrolled roots remain detectable.
 - Native augment grep follows the physical owner of its actual search path,
   never an unrelated active graph. No-path native grep still searches cwd.
-  Legacy replace-mode bare graph queries use the selected root; native options
-  retain cwd semantics.
+  Legacy replace-mode bare graph queries use the cwd project; native options and
+  fallbacks retain cwd semantics.
 - Sync spends one shared context allowance on relevant messages, including root
   labels and retirement notices—not an equal slice for every quiet root. Cold
   unchanged Git roots do not rebuild graphs, and cold probes stay off the
   blocking before-agent hook. Numerical paging retains logical focus/attention.
 - Branch-local bounded root snapshots survive compaction, reload, resume, fork,
   and tree navigation. Semantic baselines and trust are not restored. `/fovea
-  reset` clears the ring; `/fovea status` reports selection and capacity. The CLI
+  reset` clears the ring; `/fovea status` reports the ring, capacity, and the manual default. The CLI
   stays stateless. Fovea and Contour exchange session-qualified target hints,
   not heat, source content, trust, or mutation authorship.
 

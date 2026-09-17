@@ -31,7 +31,7 @@ const BudgetParam = Type.Optional(
   Type.Number({ description: "Max tokens for the response (256..16000). Estimate: 4 chars/token.", minimum: 256, maximum: 16000 }),
 );
 const RootParam = Type.Optional(
-  Type.String({ description: "Explicit root to observe and bind. Relative to session cwd; omitted uses the last bound root. Does not change native tool cwd or grant project trust." }),
+  Type.String({ description: "Explicit root to observe and bind. Relative to session cwd. Omitted uses the session cwd's own project (nearest .git or manifest), else the cwd itself; unrooted calls never follow the observed ring. Does not change native tool cwd or grant project trust." }),
 );
 const GrepParams = Type.Object({
   pattern: Type.String({ description: "Graph query for a bare identifier/path; exact text or regex pattern when search options are present." }),
@@ -110,11 +110,19 @@ export default function fovea(pi: ExtensionAPI) {
 
   // Serialize successful enrollment; failed or replaced sessions cannot bind late.
   let bindingTail: Promise<unknown> = Promise.resolve();
+  // Manual calls answer "what am I in?", never "what did I last touch?": an
+  // omitted root is the session cwd's own project (nearest Git marker or
+  // manifest), else the canonical cwd, so an umbrella/coordinator directory
+  // stays the subject with its nested repositories closed until access enrolls
+  // them. Path-driven work (grep augmentation, turn sync, provenance, and the
+  // /fovea status report) still follows the observed ring.
+  const cwdRoot = async (ctx: ExtensionContext): Promise<string> =>
+    (await discovery.discover(ctx.cwd, "."))?.root ?? canonicalPath(ctx.cwd);
   const chooseRoot = async (ctx: ExtensionContext, input?: string): Promise<string> => {
     const epoch = lifecycleEpoch;
-    if (input === undefined) await bindingTail.catch(() => {});
+    const root = input === undefined ? await cwdRoot(ctx) : roots.target(ctx.cwd, input);
     if (epoch !== lifecycleEpoch) throw new Error("Fovea session changed during target selection");
-    return roots.target(ctx.cwd, input);
+    return root;
   };
   const retireRoot = (root: string): void => {
     clearTimeout(warmTimers.get(root)); warmTimers.delete(root);
@@ -249,8 +257,14 @@ export default function fovea(pi: ExtensionAPI) {
       ],
       parameters: GrepParams,
       async execute(id, params, signal, onUpdate, ctx) {
-        const root = roots.target(ctx.cwd);
-        if (requestsNativeGrep(params) || targetConfig(root, ctx).tools.grepMode !== "replace") {
+        if (requestsNativeGrep(params)) {
+          const native = await loadNativeGrepTool(ctx.cwd);
+          return native.execute(id, params, signal, onUpdate);
+        }
+        // Legacy replace mode answers about the cwd's own project, like the
+        // native grep it replaces; every native fallback keeps cwd paths.
+        const root = await cwdRoot(ctx);
+        if (targetConfig(root, ctx).tools.grepMode !== "replace") {
           const native = await loadNativeGrepTool(ctx.cwd);
           return native.execute(id, params, signal, onUpdate);
         }
@@ -259,7 +273,7 @@ export default function fovea(pi: ExtensionAPI) {
         try {
           const result = await focus(root, query, budget, { fresh: true });
           if (Number(result.details.seeds ?? 0) === 0) {
-            const native = await loadNativeGrepTool(root);
+            const native = await loadNativeGrepTool(ctx.cwd);
             return native.execute(id, params, signal, onUpdate);
           }
           return {
@@ -270,7 +284,7 @@ export default function fovea(pi: ExtensionAPI) {
           // A broken graph backend must not break text search: degrade to
           // native grep and mark the result, the way a graph miss does.
           const message = error instanceof Error ? error.message : String(error);
-          const native = await loadNativeGrepTool(root);
+          const native = await loadNativeGrepTool(ctx.cwd);
           const fallback = await native.execute(id, params, signal, onUpdate);
           return {
             ...fallback,
@@ -614,11 +628,12 @@ export default function fovea(pi: ExtensionAPI) {
         return;
       }
       if (!roots.list().length) {
-        ctx.ui.notify(`pi-fovea ${PACKAGE_VERSION} · coordinator idle · 0/${roots.capacity} roots · no cwd scan; projects enroll after successful access.`, "info");
+        ctx.ui.notify(`pi-fovea ${PACKAGE_VERSION} · coordinator idle · 0/${roots.capacity} roots · manual default ${await cwdRoot(ctx)}; projects enroll after successful access.`, "info");
         return;
       }
       try {
         const root = roots.target(ctx.cwd);
+        const manual = await cwdRoot(ctx);
         const [state, astGrep] = await Promise.all([
           sketch(root, 256),
           pi.exec(process.env.FOVEA_AST_GREP ?? "ast-grep", ["--version"], { timeout: 15_000 })
@@ -631,7 +646,7 @@ export default function fovea(pi: ExtensionAPI) {
         const generatedCount = Array.isArray(state.details.extractionGenerated) ? state.details.extractionGenerated.length : 0;
         const cfg = targetConfig(root, ctx);
         ctx.ui.notify(
-          `pi-fovea ${PACKAGE_VERSION} · root ${root} · ${roots.list().length}/${roots.capacity} observed · ${roots.details().retirements} retired · ${coverage} · ${state.details.nodes ?? 0} symbols · ` +
+          `pi-fovea ${PACKAGE_VERSION} · ring root ${root}${manual === root ? "" : ` · manual default ${manual}`} · ${roots.list().length}/${roots.capacity} observed · ${roots.details().retirements} retired · ${coverage} · ${state.details.nodes ?? 0} symbols · ` +
           `${state.details.productionAnchors ?? state.details.anchors ?? 0} production anchors` +
           `${Number(state.details.testAnchors ?? 0) ? ` (${state.details.testAnchors} test/fixture collapsed)` : ""}` +
           `${failedCount ? ` · !${failedCount} files failed extraction` : ""}` +

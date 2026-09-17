@@ -205,8 +205,8 @@ describe("extension entry", () => {
       const sketchTool = tools.get("fovea_sketch")!;
       const ctx = fakeCtx(FIXTURE);
       const signal = new AbortController().signal;
-      await expect(sketchTool.execute("1", {}, signal, undefined, ctx)).rejects.toThrow(/ast-grep/);
-      const again = await sketchTool.execute("2", {}, signal, undefined, ctx);
+      await expect(sketchTool.execute("1", { root: FIXTURE }, signal, undefined, ctx)).rejects.toThrow(/ast-grep/);
+      const again = await sketchTool.execute("2", { root: FIXTURE }, signal, undefined, ctx);
       expect(again.content[0]!.text).toContain("fovea unavailable");
       expect(again.content[0]!.text).toContain("native");
       expect(again.details.unavailable).toBe("ast-grep");
@@ -265,7 +265,7 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     const updates: unknown[] = [];
     const result = await focusTool.execute(
       "t1",
-      { query: "GetUserHandler", fresh: true, path: "server" },
+      { root: FIXTURE, query: "GetUserHandler", fresh: true, path: "server" },
       new AbortController().signal,
       (update: unknown) => updates.push(update),
       fakeCtx(FIXTURE),
@@ -824,8 +824,14 @@ describe.skipIf(!hasAstGrep())("explicit multi-root continuity", () => {
       expect(syncBaselineStore().has(b)).toBe(true);
       expect(getState(a)).not.toBe(getState(b));
       expect(getState(b)!.root).toBe(b);
-      expect((await run()).details.root).toBe(b);
+      // Manual calls answer about the session cwd's own project, never the most
+      // recently accessed sibling; the ring still orders observed roots above.
+      expect((await run()).details.root).toBe(a);
       expect((await run("../b")).details.observedRoots).toEqual([a, b]);
+      // A cwd inside the project resolves to the project root, not the subdir.
+      const subCtx = fakeCtx(path.join(a, "server"), true);
+      const nested = await loaded.tools.get("fovea_focus")!.execute("focus-sub", { query: "server/main.go", maxTokens: 512 }, signal, undefined, subCtx);
+      expect(nested.details.root).toBe(a); expect(nested.details.agentOrigin).toBe(path.join(a, "server"));
       expect(Math.ceil(alternate.content[0]!.text.length / 4)).toBeLessThanOrEqual(512);
 
       const main = path.join(b, "server/main.go");
