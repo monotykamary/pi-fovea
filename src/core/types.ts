@@ -128,6 +128,8 @@ export interface ImportSite {
   file: string;
   spec: string;
   line: number;
+  /** Local module name for Bend's explicit `import path as Name`. */
+  alias?: string;
   /** Captured computed expression; absent bounds mean the target is unresolved. */
   dynamic?: { prefix?: string; suffix?: string };
 }

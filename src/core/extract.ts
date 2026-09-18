@@ -9,6 +9,7 @@ import {
   anonymousVariadics,
   groupByLang,
   isConfigFile,
+  langOf,
   outline,
   outlineStructured,
   patternRunAll,
@@ -19,6 +20,7 @@ import {
   type ScanRule,
 } from "./astgrep.js";
 import { mapLimit } from "./asyncutil.js";
+import { extractBend } from "./bend.js";
 import { makeFileSource, type FileSource } from "./source.js";
 import type {
   CallSite,
@@ -287,9 +289,17 @@ const parseOutlineText = (text: string, lang: string): SymbolRec[] => {
 
 const defaultSource = (cwd: string): FileSource => makeFileSource(cwd);
 
+const bendFacts = async (files: string[], source: FileSource) =>
+  mapLimit(files.filter((file) => langOf(file) === "Bend"), SOURCE_SCAN_CONCURRENCY, async (file) =>
+    extractBend(file, await source.read(file) ?? ""));
+
 export const extractSymbols = async (files: string[], cwd: string, source: FileSource = defaultSource(cwd)): Promise<SymbolRec[]> => {
   const out: SymbolRec[] = [];
   for (const [lang, langFiles] of groupByLang(files)) {
+    if (lang === "Bend") {
+      for (const facts of await bendFacts(langFiles, source)) pushAll(out, facts.symbols);
+      continue;
+    }
     const structured = await outlineStructured(langFiles, lang, cwd);
     if (structured) {
       const parsed = await parseStructuredOutline(structured, source);
@@ -327,7 +337,7 @@ const IMPORT_PATTERNS: Record<string, string[]> = {
 IMPORT_PATTERNS.JavaScript = IMPORT_PATTERNS.TypeScript!;
 IMPORT_PATTERNS.Tsx = IMPORT_PATTERNS.TypeScript!;
 
-export const supportsImportExtraction = (language: string): boolean => !!IMPORT_PATTERNS[language]?.length;
+export const supportsImportExtraction = (language: string): boolean => language === "Bend" || !!IMPORT_PATTERNS[language]?.length;
 
 // Only literal paths and one-hole expressions are modeled. Never evaluate code
 // or interpret arbitrary expressions as a static module specifier.
@@ -382,13 +392,13 @@ const importsFromMatches = (matches: readonly AgMatch[]): ImportSite[] => {
   return dedupe(out, (i) => `${i.file}|${i.spec}|${i.line}`);
 };
 
-export const extractImports = async (files: string[], cwd: string): Promise<ImportSite[]> => {
+export const extractImports = async (files: string[], cwd: string, source: FileSource = defaultSource(cwd)): Promise<ImportSite[]> => {
   const perLang = await Promise.all([...groupByLang(files)].map(([lang, langFiles]) =>
     patternRunAll(IMPORT_PATTERNS[lang] ?? [], lang, langFiles, cwd),
   ));
   const matches: AgMatch[] = [];
   for (const local of perLang) pushAll(matches, local);
-  return importsFromMatches(matches);
+  return [...importsFromMatches(matches), ...(await bendFacts(files, source)).flatMap((facts) => facts.imports)];
 };
 
 const CALL_PATTERNS = ["$O.$M($$$A)", "$F($$$A)"];
@@ -440,13 +450,13 @@ const callsFromMatches = (matches: readonly AgMatch[]): CallSite[] => {
   return out;
 };
 
-export const extractCalls = async (files: string[], cwd: string): Promise<CallSite[]> => {
-  const perLang = await Promise.all([...groupByLang(files)].map(([lang, langFiles]) =>
+export const extractCalls = async (files: string[], cwd: string, source: FileSource = defaultSource(cwd)): Promise<CallSite[]> => {
+  const perLang = await Promise.all([...groupByLang(files)].filter(([lang]) => lang !== "Bend").map(([lang, langFiles]) =>
     patternRunAll(CALL_PATTERNS, lang, langFiles, cwd),
   ));
   const matches: AgMatch[] = [];
   for (const local of perLang) pushAll(matches, local);
-  return callsFromMatches(matches);
+  return [...callsFromMatches(matches), ...(await bendFacts(files, source)).flatMap((facts) => facts.calls)];
 };
 
 const STRING_PATTERNS: Record<string, string[]> = {
@@ -529,7 +539,7 @@ const completeLiterals = async (
   out: LiteralSite[],
 ): Promise<LiteralSite[]> => {
   pushAll(out, await extractConfigLiterals(files, cwd, source));
-  const codeFiles = files.filter((f) => !isConfigFile(f));
+  const codeFiles = files.filter((f) => !isConfigFile(f) && langOf(f) !== "Bend");
   const templateSites = await mapLimit(codeFiles, SOURCE_SCAN_CONCURRENCY, async (f) => {
     const local: LiteralSite[] = [];
     const src = await source.read(f);
@@ -553,7 +563,8 @@ export const extractLiterals = async (files: string[], cwd: string, source: File
   ));
   const matches: AgMatch[] = [];
   for (const local of perLang) pushAll(matches, local);
-  return completeLiterals(files, cwd, source, literalsFromMatches(matches));
+  const native = (await bendFacts(files, source)).flatMap((facts) => facts.literals);
+  return completeLiterals(files, cwd, source, [...literalsFromMatches(matches), ...native]);
 };
 
 const CORE_IMPORT_PREFIX = "fovea-core-import-";
@@ -577,6 +588,7 @@ export const coreScanRules = (files: string[]): ScanRule[] => {
     });
   };
   for (const [language] of groupByLang(files)) {
+    if (language === "Bend") continue;
     for (const pattern of IMPORT_PATTERNS[language] ?? []) add(CORE_IMPORT_PREFIX, language, pattern);
     for (const pattern of CALL_PATTERNS) {
       const metavar = pattern.startsWith("$O.") ? "M" : "F";
@@ -607,10 +619,11 @@ export const coreFactsFromScan = async (
     else if (match.ruleId.startsWith(CORE_CALL_PREFIX)) calls.push(match);
     else if (match.ruleId.startsWith(CORE_LITERAL_PREFIX)) literals.push(match);
   }
+  const native = await bendFacts(files, source);
   return {
-    imports: importsFromMatches(imports),
-    calls: callsFromMatches(calls),
-    literals: await completeLiterals(files, cwd, source, literalsFromMatches(literals)),
+    imports: [...importsFromMatches(imports), ...native.flatMap((facts) => facts.imports)],
+    calls: [...callsFromMatches(calls), ...native.flatMap((facts) => facts.calls)],
+    literals: await completeLiterals(files, cwd, source, [...literalsFromMatches(literals), ...native.flatMap((facts) => facts.literals)]),
   };
 };
 

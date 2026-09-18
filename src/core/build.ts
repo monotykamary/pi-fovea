@@ -66,7 +66,7 @@ export interface FileFacts {
   sigs?: FileSigs;
 }
 
-const CACHE_VERSION = 15; // v15: literal dynamic imports and bounded computed import expressions
+const CACHE_VERSION = 16; // v16: native Bend 2 facts and explicit module aliases
 
 // Honest coverage: what the extractor could NOT see. Tools and status render
 // this so a thin graph never reads as a small repo; omissions are explicit.
@@ -481,7 +481,8 @@ const emptyFileFacts = (sha1: string): FileFacts => ({
 const pendingFileFacts = (file: string, sha1: string, text: string): FileFacts => {
   const facts = emptyFileFacts(sha1);
   const language = langOf(file);
-  if (!language) return facts;
+  // Implicit route rules target ast-grep; native Bend facts have no grammar.
+  if (!language || language === "Bend") return facts;
   const sigs = harvestFile(language, text);
   if (Object.keys(sigs).length) facts.sigs = sigs;
   return facts;
@@ -713,8 +714,8 @@ const extractInto = async (
       anchors = anchorsFromScan(scanned, anchorPlan, enclosingId);
     } else {
       [imports, calls, literals, anchors] = await Promise.all([
-        extractImports(code, root),
-        extractCalls(code, root),
+        extractImports(code, root, source),
+        extractCalls(code, root, source),
         extractLiterals(batch, root, source),
         extractAnchors(code, root, enclosingId, packRules.pack),
       ]);

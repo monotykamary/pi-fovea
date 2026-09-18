@@ -108,7 +108,7 @@ Runtime slash controls:
 
 ## Install
 
-Requires Node.js 20+. The install provisions [ast-grep](https://ast-grep.github.io/) automatically through the `@ast-grep/cli` npm optional dependency; an `ast-grep` found on PATH takes precedence over the packaged copy, and `FOVEA_AST_GREP=/path/to/sg` overrides both.
+Requires Node.js 20+. The install provisions [ast-grep](https://ast-grep.github.io/) automatically through the `@ast-grep/cli` npm optional dependency; an `ast-grep` found on PATH takes precedence over the packaged copy, and `FOVEA_AST_GREP=/path/to/sg` overrides both. Bend-only and config/protocol-only roots work without ast-grep; it is required when discovery or refresh includes a language that uses its parser.
 
 ```sh
 pi install npm:pi-fovea
@@ -528,6 +528,13 @@ Full symbol and call extraction: **TypeScript, TSX, JavaScript, Python, Go, and 
 Outline-based symbols: **Elixir, Ruby, C, C++, Java, Kotlin, Lua, PHP, Swift, Scala, Haskell, and Bash**.
 Config joins through literals: **YAML, JSON, TOML, env, Markdown, and OpenAPI**.
 Exact contract topology: **Protocol Buffers (`.proto`) and GraphQL (`.graphql`, `.gql`)**, joined to gRPC, tRPC, oRPC, Hono, and producer/consumer call sites.
+
+**Bend 2 (`.bend`)** uses a native source reader (no ast-grep binary or grammar required):
+definitions, laws, datatypes/constructors, explicit calls (including GPU `!`),
+strings, and local/foreign imports. Module aliases resolve qualified calls.
+A law implemented in the same file shares its definition's symbol. Built-in
+`Base`, hub packages, and out-of-root imports remain unresolved. Operator/desugared
+calls and proof checking are not modeled; Bend 1/HVM syntax is not supported.
 
 ## Development
 

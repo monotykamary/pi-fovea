@@ -293,7 +293,7 @@ const semanticFacts = (state: RepoState, file: string): string => {
   const compactSig = (sig: string): string => sig.replace(/\s+/g, " ").trim();
   const value = createHash("sha1").update(JSON.stringify({
     symbols: stable(facts.symbols.map((symbol) => [symbol.name, symbol.kind, compactSig(symbol.sig), symbol.lang])),
-    imports: stable(facts.imports.map((site) => [site.spec])),
+    imports: stable(facts.imports.map((site) => [site.spec, site.alias])),
     calls: stable(facts.calls.map((site) => [site.callee])),
     literals: stable(facts.literals.map((site) => [site.text])),
     anchors: stable(facts.anchors.map((anchor) => [anchor.id, anchor.kind, anchor.nodeId, anchor.implicit === true])),

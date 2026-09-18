@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { hasAstGrepAsync } from "./astgrep.js";
+import { hasAstGrepAsync, langOf } from "./astgrep.js";
 import {
   clearPersistTimer,
   discoverFiles,
@@ -189,12 +189,21 @@ const assembleState = async (
   return { root, version, generation, graph, csr, joinIndex, facts, extraction, discovery, adjacency, store, files, gitKind, head, dirty, history, probedAt: stamp, walkedAt: stamp, sweptAt: stamp };
 };
 
-const buildState = async (root: string): Promise<RepoState> => {
-  if (!(await hasAstGrepAsync())) {
+const requireExtractionBackend = async (files: readonly string[]): Promise<void> => {
+  // Bend and config/protocol readers are native; do not even probe a binary
+  // until discovery finds a language whose facts depend on ast-grep.
+  const needed = files.some((file) => {
+    const language = langOf(file);
+    return language !== undefined && language !== "Bend";
+  });
+  if (needed && !(await hasAstGrepAsync())) {
     throw new Error(
       "fovea: no usable ast-grep binary (set FOVEA_AST_GREP to override; PATH is checked first, then the packaged @ast-grep/cli dependency). Install: https://ast-grep.github.io/",
     );
   }
+};
+
+const buildState = async (root: string): Promise<RepoState> => {
   const { fileRoutes } = await loadRepoRules(root);
   const routeRes = fileRoutes.map((r) => new RegExp(r.re));
   const probe = await gitProbe(root);
@@ -203,6 +212,7 @@ const buildState = async (root: string): Promise<RepoState> => {
   // root had enrolled, so a restart restores coverage without a fresh edit.
   const listing = await discoverFiles(root, routeRes, new Set(await readEnrolledBoundaries(root)));
   const files = listing.files;
+  await requireExtractionBackend(files);
   const { store, report } = await factPass(() => loadFacts(root, files));
   return assembleState(root, files, store, report, listing.report, gitKind, probe?.head,
     new Set(probe ? probe.changes.map((c) => c.path).filter((p) => p && !p.endsWith("/")) : []));
@@ -362,6 +372,7 @@ const refreshState = async (state: RepoState, hints: string[] = [], force = fals
     state.probedAt = Date.now();
     return state;
   }
+  await requireExtractionBackend(files);
   const { report, stats } = await factPass(() =>
     refreshFacts(state.root, store, files, [...new Set(changed)], [...new Set(deleted)]),
   );

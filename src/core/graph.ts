@@ -79,6 +79,7 @@ const buildImportIndex = (files: string[]): ImportIndex => {
 
 interface ImportResolution {
   file: string;
+  alias?: string;
   evidence: EdgeEvidence;
 }
 
@@ -95,6 +96,14 @@ const resolveImportToFile = (
       ? { file: hits[0]!, evidence: { strategy, rule: "import-resolve", source: spec, candidates: hits.length } }
       : undefined;
   };
+  if (fam === "bend") {
+    // Base is bundled by the compiler; hub packages are external. Neither
+    // should accidentally resolve via the TypeScript bare-specifier fallback.
+    if (spec === "Base" || /^0x[0-9a-f]+\//i.test(spec) || posix.isAbsolute(spec)) return undefined;
+    const local = posix.normalize(posix.join(posix.dirname(fromFile), spec));
+    if (local === ".." || local.startsWith("../")) return undefined;
+    return exact([local], "relative-import");
+  }
   if (spec.startsWith("./") || spec.startsWith("../")) {
     let base = posix.normalize(posix.join(posix.dirname(fromFile), spec));
     // NodeNext convention: TS files import "./sibling.js" — the .js refers to
@@ -335,7 +344,7 @@ export const assembleGraphWithIndex = async (
       importCoverage.resolved++;
       if (target.file === rel) continue;
       pushEdge(fileIdx.get(rel)!, fileIdx.get(target.file)!, "imports", 0.3, target.evidence);
-      (importTargets.get(rel) ?? importTargets.set(rel, []).get(rel)!).push(target);
+      (importTargets.get(rel) ?? importTargets.set(rel, []).get(rel)!).push({ ...target, alias: imp.alias });
     }
     if (isTestFile(rel)) {
       for (const target of importTargets.get(rel) ?? []) {
@@ -356,9 +365,15 @@ export const assembleGraphWithIndex = async (
   await forEachChunked(files, 256, (rel) => {
     const f = facts(rel);
     if (!f) return;
-    const imported = new Set((importTargets.get(rel) ?? []).map((target) => target.file));
+    const targets = importTargets.get(rel) ?? [];
+    const imported = new Set(targets.map((target) => target.file));
+    const bend = langFamily(rel) === "bend";
+    const aliases = bend ? targets.filter((target) => target.alias).sort((a, b) => b.alias!.length - a.alias!.length) : [];
     for (const call of f.calls) {
-      const cands = byName.get(call.callee.toLowerCase()) ?? [];
+      const alias = aliases.find((target) => call.callee.startsWith(`${target.alias}.`));
+      const name = alias ? call.callee.slice(alias.alias!.length + 1) : call.callee;
+      const cands = (byName.get(name.toLowerCase()) ?? []).filter((i) => !bend ||
+        (nodes[i]!.lang === "Bend" && nodes[i]!.name === name && nodes[i]!.file === (alias?.file ?? rel)));
       if (!cands.length || cands.length > 48) continue;
       let strategy: EdgeEvidence["strategy"] = "same-file-symbol";
       let chosen: number[] = cands.filter((i) => nodes[i]!.file === rel);

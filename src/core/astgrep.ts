@@ -20,6 +20,7 @@ export const LANG_BY_EXT: Record<string, string> = {
   py: "Python",
   go: "Go",
   rs: "Rust",
+  bend: "Bend", // Native source reader; never sent to ast-grep patterns.
   // Second tier: symbols via ast-grep outline; name derivation is heuristic.
   ex: "Elixir", exs: "Elixir",
   rb: "Ruby",
