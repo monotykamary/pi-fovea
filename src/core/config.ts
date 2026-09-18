@@ -6,6 +6,7 @@
 
 import { configDirName } from "./agent-dir.js";
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 export const SYNC_MODES = ["enabled", "hidden", "disabled"] as const;
@@ -214,9 +215,21 @@ export const saveFoveaConfig = (
     : globalFoveaConfigPath(scopes.agentDir);
   const merged = mergeDeep(readConfigFile(targetPath), partial);
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-  const tmp = `${targetPath}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + "\n");
-  fs.renameSync(tmp, targetPath);
+  const tmp = `${targetPath}.tmp-${process.pid}-${randomUUID()}`;
+  const fd = fs.openSync(tmp, "wx", 0o600);
+  try {
+    fs.writeFileSync(fd, JSON.stringify(merged, null, 2) + "\n");
+    fs.renameSync(tmp, targetPath);
+  } finally {
+    const written = fs.fstatSync(fd);
+    fs.closeSync(fd);
+    try {
+      const current = fs.lstatSync(tmp);
+      if (current.isFile() && current.dev === written.dev && current.ino === written.ino
+        && current.uid === written.uid && current.size === written.size && current.mtimeMs === written.mtimeMs
+        && current.ctimeMs === written.ctimeMs) fs.unlinkSync(tmp);
+    } catch { /* our staging file may already have been renamed */ }
+  }
   return { scope, path: targetPath };
 };
 

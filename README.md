@@ -568,6 +568,54 @@ ast-grep. Failed extractions keep fact-free hash markers that stay visible
 across launches. Those files skip the retry on each start. Bump `CACHE_VERSION`
 in `src/core/build.ts` whenever extractor semantics change.
 
+### Temporary-storage retention
+
+Retention runs asynchronously on actual facts/cochange, journal, spill, or scan
+activity—not extension registration or idle lifecycle hooks. Sweeps are coalesced
+and throttled to once per five minutes per process. No background timer is kept.
+Policies apply across roots in the OS `tmpdir()` (`$TMPDIR` where supported):
+
+| Artifacts | Retention |
+| --- | --- |
+| Facts + cochange (`pi-fovea-<16hex>.json`, `pi-fovea-cochange-<16hex>.json`) | Combined 128 MiB / 128 files; expire after 7 days; oldest modification first; 5-minute fresh-write grace |
+| Focus/dwell/impact/sketch spills (`pi-fovea-<op>-<8hex>.txt`) | Combined 32 MiB / 128 files; expire after 24 hours; oldest modification first; 1-hour grace for reading advertised paths |
+| Provenance journals (`pi-fovea-provenance-<16hex>-<16hex>.json`) | Only the existing 7-day record TTL; **never pressure-evict fresh attribution** |
+| Partial atomic writes (`<recognized-name>.tmp-<PID>-<UUID>`) and new scan rules (`pi-fovea-scan-<PID>-<UUID>.yml`) | Clean in `finally`; recover abandoned files only after 1 hour and only when their PID is definitely dead |
+
+These are best-effort, eventual limits, not global quotas: grace periods, active
+writers, concurrent processes, permission failures, and no subsequent activity can
+leave totals temporarily above budget. Reads do not refresh modification times.
+Cache reads/writes are capped at **64 MiB per file**. Oversized facts persistence
+is skipped without changing in-memory extraction, and the prior cache remains
+valid through normal content/stat checks; oversized disk caches are misses.
+Spills are capped at **8 MiB**; rejected writes omit the artifact pointer, never
+advertise a truncated full list. All cache/spill replacements use exclusive 0600
+staging files and atomic rename. Journals retain their existing 256-record cap
+without a new byte cap; malformed or oversized journals are conservatively left
+alone by housekeeping.
+
+Cleanup recognizes exact names only, checks `lstat` for regular, singly linked,
+current-UID files, and rechecks device/inode/size/mtime/ctime immediately before
+unlink. Symlinks, directories, unrelated names and other users' files are never
+cleanup candidates; unknown ownership is a reason to skip. Platforms without UID
+verification do not create persistent caches, spills or attribution journals;
+analysis continues without disk reuse and cross-session attribution is unavailable.
+Exclusively created per-invocation scan files still clean up by inode identity.
+Descriptor reads remain byte-bounded even if a file grows after validation. Filesystem APIs do not
+provide atomic unlink-by-inode, so this is best-effort race detection, not a
+security boundary against a hostile same-UID process. New scans have independent
+rule files kept until every chunk finishes, with no unbounded rule-file map.
+Legacy `pi-fovea-scan-*` directories have no trustworthy PID metadata and are left
+for explicit, separately reviewed reclamation—there is no recursive prefix purge.
+Adjacent configuration staging is also cleaned on write/rename failure, but
+configuration files and developer-owned reports are not retention candidates.
+The performance-corpus benchmark retains `raw.json`/`summary.json` reports under
+`tmpdir()`, but removes its uniquely allocated per-worker scratch (facts and Git
+index) after worker success or failure. Existing reports, coverage work directories
+and history-corpus data are not swept. For explicit maintenance, the internal
+`pruneTempStorage({ directory })` helper returns eligible paths without mutation;
+only `{ directory, dryRun: false }` applies the same rechecked policy.
+
 ## Acknowledgments
 
 Thanks to [Alp](https://www.patreon.com/cw/alpderps), the original user whose request for a better LSP extension started this project.

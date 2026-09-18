@@ -4,7 +4,7 @@
 // Budget conformance is a prefix fit: candidates sorted by heat, binary search
 // on prefix length — aider's render-and-count loop generalized to a field.
 
-import { writeFileSync } from "node:fs";
+import { writeSpill } from "./temp-storage.js";
 import type { Edge, EdgeEvidence, EdgeKind, Graph, NodeRec } from "./types.js";
 
 export const tokenEstimate = (text: string): number => Math.ceil(text.length / 4);
@@ -282,7 +282,7 @@ export const revealFoveated = (
   let overflowPath: string | undefined;
   if (truncated && opts.overflowTo) {
     try {
-      writeFileSync(opts.overflowTo, `${header}\n${allItems.join("\n")}\n`);
+      writeSpill(opts.overflowTo, `${header}\n${allItems.join("\n")}\n`);
       overflowPath = opts.overflowTo;
     } catch {
       // An unwritable artifact drops the footer pointer; that only shortens
@@ -340,7 +340,7 @@ export const revealGroups = (
   let overflowPath: string | undefined;
   if (kBest < ordered.length && opts.overflowTo) {
     try {
-      writeFileSync(opts.overflowTo, [opts.header, ...ordered.map((gl) => `${gl.label.padEnd(2)} ${gl.detail}`)].join("\n") + "\n");
+      writeSpill(opts.overflowTo, [opts.header, ...ordered.map((gl) => `${gl.label.padEnd(2)} ${gl.detail}`)].join("\n") + "\n");
       overflowPath = opts.overflowTo;
     } catch {
       text = renderK(kBest, "");

@@ -1,10 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
-import { readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
+import { JOURNAL_TTL_MS, maintainTempStorage, readTempText, writeAtomicTemp } from "./temp-storage.js";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const JOURNAL_VERSION = 1;
-const JOURNAL_TTL_MS = 7 * 24 * 3600_000;
 const JOURNAL_MAX_RECORDS = 256;
 
 interface MutationRecord {
@@ -84,7 +84,7 @@ const persistRecords = async (
   const cutoff = Date.now() - JOURNAL_TTL_MS;
   let records: MutationRecord[] = [];
   try {
-    const existing = JSON.parse(await readFile(target, "utf8")) as MutationJournal;
+    const existing = JSON.parse(await readTempText(target, Infinity)) as MutationJournal;
     if (existing.version === JOURNAL_VERSION && existing.root === journal.root && existing.owner === journal.owner) {
       records = existing.records.filter((item) => item.at >= cutoff);
     }
@@ -93,9 +93,8 @@ const persistRecords = async (
   }
   records.push(...additions);
   journal.records = records.slice(-JOURNAL_MAX_RECORDS);
-  const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(temporary, JSON.stringify(journal));
-  await rename(temporary, target);
+  // Attribution is not a regenerable cache: never impose a pressure/byte cap.
+  await writeAtomicTemp(target, JSON.stringify(journal), Infinity);
 };
 
 export const recordMutationTransitions = async (
@@ -155,6 +154,7 @@ export const finishMutation = async (
 );
 
 const readRecords = async (root: string, since: number): Promise<MutationRecord[]> => {
+  void maintainTempStorage();
   const prefix = prefixFor(root);
   await Promise.all([...writeQueues.entries()]
     .filter(([path]) => path.split(/[/\\]/u).at(-1)?.startsWith(prefix))
@@ -162,7 +162,7 @@ const readRecords = async (root: string, since: number): Promise<MutationRecord[
   const cutoff = Math.max(since, Date.now() - JOURNAL_TTL_MS);
   let names: string[];
   try {
-    names = (await readdir(tmpdir())).filter((name) => name.startsWith(prefix) && name.endsWith(".json"));
+    names = (await readdir(tmpdir())).filter((name) => name.startsWith(prefix) && /^[a-f0-9]{16}\.json$/.test(name.slice(prefix.length)));
   } catch {
     return [];
   }
@@ -170,13 +170,9 @@ const readRecords = async (root: string, since: number): Promise<MutationRecord[
   await Promise.all(names.map(async (name) => {
     const path = join(tmpdir(), name);
     try {
-      const journal = JSON.parse(await readFile(path, "utf8")) as MutationJournal;
+      const journal = JSON.parse(await readTempText(path, Infinity)) as MutationJournal;
       if (journal.version !== JOURNAL_VERSION || journal.root !== resolve(root) || !Array.isArray(journal.records)) return;
       const live = journal.records.filter((record) => record.at >= cutoff);
-      if (!live.length && journal.records.every((record) => record.at < Date.now() - JOURNAL_TTL_MS)) {
-        await unlink(path).catch(() => {});
-        return;
-      }
       records.push(...live);
     } catch {
       // A concurrent atomic replacement or malformed journal is unattributed.

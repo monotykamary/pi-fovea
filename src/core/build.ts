@@ -13,12 +13,12 @@
 // serve the live session (a thin graph beats none) but are never persisted,
 // so one bad invocation can't poison warm starts forever.
 
-import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { lstat, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, readFile, readdir, stat } from "node:fs/promises";
+import { CACHE_FILE_MAX_BYTES, maintainTempStorage, openTempRead, writeAtomicTemp } from "./temp-storage.js";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
-import { dirname, join as joinPath } from "node:path";
+import { join as joinPath } from "node:path";
 import { IO_CONCURRENCY, SPAWN_CONCURRENCY, envInt, mapLimit, yieldToLoop } from "./asyncutil.js";
 import { gitOut } from "./git.js";
 import {
@@ -504,7 +504,10 @@ export const cachePathFor = (root: string): string =>
   joinPath(tmpdir(), `pi-fovea-${createHash("sha1").update(root).digest("hex").slice(0, 16)}.json`);
 
 const loadDiskStore = async (root: string): Promise<FactStore | undefined> => {
-  const stream = createReadStream(cachePathFor(root), { encoding: "utf8" });
+  void maintainTempStorage();
+  const handle = await openTempRead(cachePathFor(root)).catch(() => undefined);
+  if (!handle) return undefined;
+  const stream = handle.createReadStream({ encoding: "utf8", end: CACHE_FILE_MAX_BYTES - 1 });
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   let store: FactStore | undefined;
   let count = 0;
@@ -561,45 +564,39 @@ export const persistFacts = async (store: FactStore): Promise<void> => {
     enrolled: [...store.enrolled].sort(),
   } satisfies CacheHeader);
   const target = cachePathFor(store.root);
-  const tmpName = `${target}.tmp-${process.pid}-${randomUUID()}`;
-  try {
-    await mkdir(dirname(target), { recursive: true });
-    const handle = await open(tmpName, "w");
-    try {
-      let batch = header + "\n";
-      let count = 0;
-      const files = new Set([...store.facts.keys(), ...store.failedSha.keys()]);
-      for (const file of files) {
-        const facts = store.facts.get(file);
-        const meta = store.meta.get(file);
-        if (!meta) continue;
-        let line: CacheLine | undefined;
-        if (store.tainted.has(file)) {
-          const sha1 = store.failedSha.get(file) ?? facts?.sha1;
-          if (sha1) line = { file, sha1, size: meta.size, mtime: meta.mtime, failed: true };
-        } else if (facts) {
-          const { sha1, ...rest } = facts;
-          line = { file, sha1, size: meta.size, mtime: meta.mtime, facts: rest };
-        }
-        if (!line) continue;
-        if (store.generated.has(file)) line.generated = true;
-        batch += JSON.stringify(line) + "\n";
-        if (batch.length >= 1024 * 1024) {
-          await handle.write(batch);
-          batch = "";
-          await yieldToLoop();
-        } else if (++count % 2000 === 0) {
-          await yieldToLoop();
-        }
+  async function* chunks(): AsyncGenerator<string> {
+    let batch = header + "\n";
+    let count = 0;
+    const files = new Set([...store.facts.keys(), ...store.failedSha.keys()]);
+    for (const file of files) {
+      const facts = store.facts.get(file);
+      const meta = store.meta.get(file);
+      if (!meta) continue;
+      let line: CacheLine | undefined;
+      if (store.tainted.has(file)) {
+        const sha1 = store.failedSha.get(file) ?? facts?.sha1;
+        if (sha1) line = { file, sha1, size: meta.size, mtime: meta.mtime, failed: true };
+      } else if (facts) {
+        const { sha1, ...rest } = facts;
+        line = { file, sha1, size: meta.size, mtime: meta.mtime, facts: rest };
       }
-      if (batch) await handle.write(batch);
-    } finally {
-      await handle.close();
+      if (!line) continue;
+      if (store.generated.has(file)) line.generated = true;
+      batch += JSON.stringify(line) + "\n";
+      if (batch.length >= 1024 * 1024) {
+        yield batch;
+        batch = "";
+        await yieldToLoop();
+      } else if (++count % 2000 === 0) {
+        await yieldToLoop();
+      }
     }
-    await rename(tmpName, target);
+    if (batch) yield batch;
+  }
+  try {
+    await writeAtomicTemp(target, chunks());
     store.savedAt = Date.now();
   } catch {
-    await rm(tmpName, { force: true }).catch(() => undefined);
     // Cache is an optimization; never fail the build over it.
   }
 };
@@ -610,7 +607,10 @@ export const persistFacts = async (store: FactStore): Promise<void> => {
  * the first listing so a restart restores coverage without a fresh edit.
  */
 export const readEnrolledBoundaries = async (root: string): Promise<string[]> => {
-  const stream = createReadStream(cachePathFor(root), { encoding: "utf8" });
+  void maintainTempStorage();
+  const handle = await openTempRead(cachePathFor(root)).catch(() => undefined);
+  if (!handle) return [];
+  const stream = handle.createReadStream({ encoding: "utf8", end: CACHE_FILE_MAX_BYTES - 1 });
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   try {
     for await (const line of lines) {

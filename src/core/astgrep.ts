@@ -9,9 +9,8 @@
 
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, readFileSync } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { withScanRuleFile } from "./temp-storage.js";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { SPAWN_CONCURRENCY, envInt, mapLimit, spawnGate } from "./asyncutil.js";
 
@@ -410,30 +409,10 @@ const hasRuleScan = (): Promise<boolean> => {
   return probe;
 };
 
-const scanRuleFiles = new Map<string, Promise<string>>();
-
-const materializeRuleFile = (rules: readonly ScanRule[]): Promise<string> => {
-  const key = JSON.stringify(rules);
-  const hit = scanRuleFiles.get(key);
-  if (hit) return hit;
-  const pending = (async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-fovea-scan-"));
-    const documents = rules.map(({ id, language, pattern, constraints }) => {
-      const live = constraints ? liveConstraints(pattern, constraints) : undefined;
-      return JSON.stringify({
-        id,
-        language,
-        rule: { pattern },
-        ...(live ? { constraints: live } : {}),
-      });
-    });
-    const rulePath = join(root, "rules.yml");
-    await writeFile(rulePath, documents.join("\n---\n"));
-    return rulePath;
-  })();
-  scanRuleFiles.set(key, pending);
-  return pending;
-};
+const ruleDocuments = (rules: readonly ScanRule[]): string => rules.map(({ id, language, pattern, constraints }) => {
+  const live = constraints ? liveConstraints(pattern, constraints) : undefined;
+  return JSON.stringify({ id, language, rule: { pattern }, ...(live ? { constraints: live } : {}) });
+}).join("\n---\n");
 
 const scanChunk = (
   rulePath: string,
@@ -503,23 +482,23 @@ export const scanRules = async (
 ): Promise<ScanMatch[] | undefined> => {
   if (!rules.length || !files.length) return [];
   if (!(await hasRuleScan())) return undefined;
-  let rulePath: string;
   try {
-    rulePath = await materializeRuleFile(rules);
+    return await withScanRuleFile(ruleDocuments(rules), async (rulePath) => {
+      const chunks: string[][] = [];
+      for (let i = 0; i < files.length; i += AST_GREP_CHUNK) {
+        chunks.push(files.slice(i, i + AST_GREP_CHUNK));
+      }
+      const settled = await mapLimit(chunks, SPAWN_CONCURRENCY, (chunk) =>
+        scanChunk(rulePath, chunk, cwd).catch(() => undefined),
+      );
+      if (settled.some((matches) => matches === undefined)) return undefined;
+      const out: ScanMatch[] = [];
+      for (const matches of settled) for (const match of matches!) out.push(match);
+      return out;
+    });
   } catch {
     return undefined;
   }
-  const chunks: string[][] = [];
-  for (let i = 0; i < files.length; i += AST_GREP_CHUNK) {
-    chunks.push(files.slice(i, i + AST_GREP_CHUNK));
-  }
-  const settled = await mapLimit(chunks, SPAWN_CONCURRENCY, (chunk) =>
-    scanChunk(rulePath, chunk, cwd),
-  );
-  if (settled.some((matches) => matches === undefined)) return undefined;
-  const out: ScanMatch[] = [];
-  for (const matches of settled) for (const match of matches!) out.push(match);
-  return out;
 };
 
 // `ast-grep run --pattern` with JSON output for a set of files of one language.

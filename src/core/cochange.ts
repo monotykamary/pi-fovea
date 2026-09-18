@@ -23,9 +23,10 @@
 // the wall clock advances.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { maintainTempStorage, readTempText, writeAtomicTemp } from "./temp-storage.js";
 import { tmpdir } from "node:os";
-import { dirname, resolve, join as joinPath } from "node:path";
+import { resolve, join as joinPath } from "node:path";
 import { envInt } from "./asyncutil.js";
 import { gitHead, gitOut, gitPrefix } from "./git.js";
 
@@ -201,8 +202,9 @@ export const coChangeHistory = async (
     .digest("hex")
     .slice(0, 12);
   const cp = cachePath(root);
+  void maintainTempStorage();
   try {
-    const cached = JSON.parse(await readFile(cp, "utf8")) as CacheShape;
+    const cached = JSON.parse(await readTempText(cp)) as CacheShape;
     if (
       cached.v === COCHANGE_CACHE_VERSION && cached.head === head && cached.key === key
       && Number.isInteger(cached.commits) && Array.isArray(cached.pairs)
@@ -323,8 +325,7 @@ export const coChangeHistory = async (
   const pairs = scored.filter((_, i) => keep.has(i));
 
   try {
-    await mkdir(dirname(cp), { recursive: true });
-    await writeFile(cp, JSON.stringify({
+    await writeAtomicTemp(cp, JSON.stringify({
       v: COCHANGE_CACHE_VERSION,
       head,
       key,

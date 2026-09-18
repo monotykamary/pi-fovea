@@ -3,11 +3,18 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
+// Only scratch created by this invocation is recursively removable. Pin IDs are
+// input data, never deletion paths; named raw/summary reports remain user-owned.
+export const withMeasurementScratch = async (output, task) => {
+  const cache = await mkdtemp(join(output, 'scratch-'));
+  try { return await task(cache); }
+  finally { await rm(cache, { recursive: true, force: true }); }
+};
 const digest = value => createHash('sha256').update(value).digest('hex');
 const distribution = samples => {
   const sorted = [...samples].sort((a, b) => a - b);
@@ -77,13 +84,13 @@ if (process.argv[2] === 'worker') {
     focusArtifactBytes, parity };
   evictState(root);
   console.log(JSON.stringify(result));
-} else {
+} else if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [workArg, beforeArg, afterArg, roundsArg = '3'] = process.argv.slice(2);
   if (!workArg || !beforeArg || !afterArg) throw Error('Usage: bun run corpus:performance <coverage-work> <before-source> <after-source> [rounds]');
   const work = resolve(workArg), before = resolve(beforeArg), after = resolve(afterArg);
   const rounds = Number(roundsArg);
   assert(Number.isInteger(rounds) && rounds >= 2 && rounds <= 10);
-  const output = await mkdtemp('/tmp/fovea-performance.');
+  const output = await mkdtemp(join(tmpdir(), 'fovea-performance.'));
   console.log(`Measurements: ${output}`);
   const pins = JSON.parse(await readFile(join(work, 'pins.json'), 'utf8'));
   const run = promisify(execFile), rows = [];
@@ -100,19 +107,19 @@ if (process.argv[2] === 'worker') {
     for (let round = 0; round < rounds; round++) {
       const pair = {};
       for (const label of round % 2 === 0 ? ['before', 'after'] : ['after', 'before']) {
-        const cache = join(output, pin.id, String(round), label === 'before' ? 'A' : 'B');
-        await mkdir(cache, { recursive: true });
-        const index = join(cache, 'git-index');
-        await copyFile(indexSource, index);
-        const env = { ...process.env, TMPDIR: cache, GIT_INDEX_FILE: index, GIT_OPTIONAL_LOCKS: '1',
-          FOVEA_MAX_FILES: '8000', FOVEA_MAX_FILE_BYTES: '1048576', FOVEA_SPAWN_CONCURRENCY: '2',
-          GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
-        // Native Git caches must not leak from an optimized run into its baseline.
-        await run('git', ['-C', root, 'update-index', '--no-untracked-cache'], { env });
-        const { stdout } = await run(process.execPath, [fileURLToPath(import.meta.url), 'worker', label === 'before' ? before : after, root, query, join(work, 'cache', pin.id + '-candidate')], {
-          env, timeout: 180000, maxBuffer: 8 * 1024 * 1024,
+        pair[label] = await withMeasurementScratch(output, async cache => {
+          const index = join(cache, 'git-index');
+          await copyFile(indexSource, index);
+          const env = { ...process.env, TMPDIR: cache, TMP: cache, TEMP: cache, GIT_INDEX_FILE: index, GIT_OPTIONAL_LOCKS: '1',
+            FOVEA_MAX_FILES: '8000', FOVEA_MAX_FILE_BYTES: '1048576', FOVEA_SPAWN_CONCURRENCY: '2',
+            GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
+          // Native Git caches must not leak from an optimized run into its baseline.
+          await run('git', ['-C', root, 'update-index', '--no-untracked-cache'], { env });
+          const { stdout } = await run(process.execPath, [fileURLToPath(import.meta.url), 'worker', label === 'before' ? before : after, root, query, join(work, 'cache', pin.id + '-candidate')], {
+            env, timeout: 180000, maxBuffer: 8 * 1024 * 1024,
+          });
+          return JSON.parse(stdout);
         });
-        pair[label] = JSON.parse(stdout);
         rows.push({ repo, sha: pin.sha, round, label, ...pair[label] });
         await writeFile(join(output, 'raw.json'), JSON.stringify(rows, null, 2));
       }
