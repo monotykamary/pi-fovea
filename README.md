@@ -258,7 +258,11 @@ is absorbed silently, so broad umbrella coverage does not become broad model
 context. Set `sync.scope` to `"repository"` to restore root-wide steering.
 
 A meaningful current, mixed, or unattributed change inside the attention scope
-can still ship post-turn with `deliverAs: "steer"` and `triggerTurn`. A relevant
+can still ship post-turn with `deliverAs: "steer"` and `triggerTurn`. If
+[pi-queue-steer](https://github.com/monotykamary/pi-queue-steer-factory) still
+holds rows (`globalThis.__tmustierPiQueueSteerState.pending > 0`), that same
+notice rides `nextTurn` instead so a queued user row stays first in Pi's native
+lane and Fovea cannot `triggerTurn` ahead of it. A relevant
 change attributed solely to another Fovea-enabled session is queued for the
 next user prompt instead; it never restarts an idle agent. The compact update
 names changed files, route deltas, and newly relevant files. Shell commands,

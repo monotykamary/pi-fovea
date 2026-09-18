@@ -610,6 +610,45 @@ describe.skipIf(!hasAstGrep())("extension execution", () => {
     }
   });
 
+  it("yields post-turn steer to pi-queue-steer while that queue still holds rows", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "pi-fovea-queue-steer-"));
+    cpSync(FIXTURE, root, { recursive: true });
+    execSync("git init -qb main && git add -A", { cwd: root });
+    execSync('git -c user.name=t -c user.email=t@t commit -qm init', { cwd: root });
+    resetSessions();
+    resetSyncBaselines();
+    const loaded = load();
+    const ctx = fakeCtx(root);
+    const mirror = globalThis as { __tmustierPiQueueSteerState?: { pending: number; paused: boolean; blocked: boolean } };
+    const previous = mirror.__tmustierPiQueueSteerState;
+    mirror.__tmustierPiQueueSteerState = { pending: 2, paused: false, blocked: false };
+    try {
+      await enter(loaded, ctx);
+      await loaded.emit("before_agent_start", { prompt: "change the route" }, ctx);
+      await loaded.emit("turn_start", {}, ctx);
+      const main = path.join(root, "server/main.go");
+      await loaded.emit(
+        "tool_result",
+        { toolCallId: "read-1", toolName: "read", input: { path: main }, isError: false },
+        ctx,
+      );
+      writeFileSync(
+        main,
+        readFileSync(main, "utf8").replace(
+          'r.POST("/api/users", server.CreateUserHandler)',
+          'r.POST("/api/users", server.CreateUserHandler)\n\tr.GET("/api/users/:id/queued", server.GetUserHandler)',
+        ),
+      );
+      await loaded.emit("turn_end", {}, ctx);
+      expect(loaded.messages).toHaveLength(1);
+      expect(loaded.messages[0]!.options).toEqual({ deliverAs: "nextTurn" });
+      expect(String(loaded.messages[0]!.message.content)).toContain("Steer: account for this update");
+    } finally {
+      mirror.__tmustierPiQueueSteerState = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("queues another session's relevant update for the next prompt", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "pi-fovea-other-session-"));
     cpSync(FIXTURE, root, { recursive: true });

@@ -92,6 +92,21 @@ const text = (s: string) => ({ type: "text" as const, text: s });
 const syncRuns = (config: FoveaConfig): boolean => config.sync.mode !== "disabled";
 const syncDisplays = (config: FoveaConfig): boolean => config.sync.mode === "enabled";
 
+/** pi-queue-steer mirrors `{ pending, paused, blocked }` on globalThis so
+ *  peers can yield the native steer/follow-up lane without a package
+ *  dependency or listener-order race (same snapshot pi-ledger reads). */
+const queueSteerPending = (): number => {
+  const state = (globalThis as { __tmustierPiQueueSteerState?: { pending?: unknown } }).__tmustierPiQueueSteerState;
+  return typeof state?.pending === "number" && Number.isFinite(state.pending) ? Math.max(0, state.pending) : 0;
+};
+
+/** Parked queue-steer rows own the next native slot. Do not `triggerTurn` a
+ *  Fovea steer in front of them — ride `nextTurn` until that backlog drains. */
+const syncDelivery = (nextPrompt: boolean): { deliverAs: "nextTurn" } | { deliverAs: "steer"; triggerTurn: true } =>
+  nextPrompt || queueSteerPending() > 0
+    ? { deliverAs: "nextTurn" }
+    : { deliverAs: "steer", triggerTurn: true };
+
 const NODE_KINDS = new Set<NodeKind>([
   "function", "method", "class", "interface", "type", "field", "decl", "file", "anchor",
 ]);
@@ -461,8 +476,7 @@ export default function fovea(pi: ExtensionAPI) {
     turnFiles = [];
     for (const notice of await pollRoots(ctx, "cheap", files)) {
       pi.sendMessage({ customType: "pi-fovea-sync", content: notice.content,
-        display: notice.display, details: notice.details }, notice.nextPrompt
-        ? { deliverAs: "nextTurn" } : { deliverAs: "steer", triggerTurn: true });
+        display: notice.display, details: notice.details }, syncDelivery(notice.nextPrompt));
     }
   });
 
