@@ -7,16 +7,34 @@ import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { canonicalPath, ExecutionRoots, ProjectDiscovery, accessedPaths, WORKSPACE_ACCESS_EVENT, peerWorkspaceRoot, latestWorkspaceEntry } from "./core/roots.js";
-import { ensureState, evictState } from "./core/state.js";
 import { resolveAgentDir } from "./core/agent-dir.js";
 import { loadFoveaConfig, type FoveaConfig } from "./core/config.js";
 import { hasAstGrep } from "./core/astgrep.js";
 import { OBSERVED_ROOT_LIMIT } from "./core/asyncutil.js";
-import { coverageSummary, dwell, focus, impact, sketch } from "./core/ops.js";
 import { observeSessionPaths, resetSessions } from "./core/session.js";
-import { captureMutation, finishMutation, type MutationCapture } from "./core/provenance.js";
-import { resetSyncBaselines, sync, syncBaselineStore, warmSync } from "./core/sync.js";
+import type { MutationCapture } from "./core/provenance.js";
 import type { NodeKind } from "./core/types.js";
+
+type Runtime = typeof import("./core/extension-runtime.js");
+let runtime: Runtime | undefined;
+let runtimeLoading: Promise<Runtime> | undefined;
+const loadRuntime = (): Promise<Runtime> => runtimeLoading ??= import("./core/extension-runtime.js")
+  .then(loaded => runtime = loaded)
+  .catch(error => { runtimeLoading = undefined; throw error; });
+
+// Keep registrations and idle lifecycle hooks cheap. Async work retains its
+// original contracts; cleanup never loads an engine that was not used.
+const ensureState: Runtime["ensureState"] = (...args) => loadRuntime().then(r => r.ensureState(...args));
+const sketch: Runtime["sketch"] = (...args) => loadRuntime().then(r => r.sketch(...args));
+const focus: Runtime["focus"] = (...args) => loadRuntime().then(r => r.focus(...args));
+const dwell: Runtime["dwell"] = (...args) => loadRuntime().then(r => r.dwell(...args));
+const impact: Runtime["impact"] = (...args) => loadRuntime().then(r => r.impact(...args));
+const sync: Runtime["sync"] = (...args) => loadRuntime().then(r => r.sync(...args));
+const warmSync: Runtime["warmSync"] = (...args) => loadRuntime().then(r => r.warmSync(...args));
+const captureMutation: Runtime["captureMutation"] = (...args) => loadRuntime().then(r => r.captureMutation(...args));
+const finishMutation: Runtime["finishMutation"] = (...args) => loadRuntime().then(r => r.finishMutation(...args));
+const resetSyncBaselines = (...args: Parameters<Runtime["resetSyncBaselines"]>) => runtime?.resetSyncBaselines(...args);
+const evictState = (...args: Parameters<Runtime["evictState"]>) => runtime?.evictState(...args);
 
 const PACKAGE_VERSION = (() => {
   try {
@@ -142,7 +160,7 @@ export default function fovea(pi: ExtensionAPI) {
       const current = () => epoch === lifecycleEpoch && roots.lease(root) === lease;
       if (!peer) pi.events?.emit(WORKSPACE_ACCESS_EVENT, { version: 1, source: "fovea", root, sessionId: ctx.sessionManager.getSessionId() });
       const cfg = targetConfig(root, ctx);
-      if (syncRuns(cfg) && !syncBaselineStore().has(root)) {
+      if (syncRuns(cfg) && !runtime?.syncBaselineStore().has(root)) {
         const state = await ensureState(root);
         if (!current()) throw new Error("Fovea workspace changed during indexing");
         await sync(root, { files: [], budget: cfg.sync.budget, steerThreshold: cfg.sync.steerThreshold, scope: cfg.sync.scope,
@@ -639,7 +657,7 @@ export default function fovea(pi: ExtensionAPI) {
           pi.exec(process.env.FOVEA_AST_GREP ?? "ast-grep", ["--version"], { timeout: 15_000 })
             .catch(() => ({ code: -1, stdout: "" })),
         ]);
-        const coverage = coverageSummary(state.details);
+        const coverage = (await loadRuntime()).coverageSummary(state.details);
         const failedCount = Number(state.details.extractionFailures ?? 0);
         const unreadableCount = Array.isArray(state.details.extractionUnreadable) ? state.details.extractionUnreadable.length : 0;
         const oversizedCount = Array.isArray(state.details.extractionOversized) ? state.details.extractionOversized.length : 0;

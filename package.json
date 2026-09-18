@@ -68,7 +68,7 @@
     "test:changed": "node scripts/test-affected.mjs",
     "test:affected": "node scripts/test-affected.mjs --base $PI_TEST_BASE",
     "test:related": "vitest related",
-    "test:smoke": "vitest run tests/config.test.ts tests/settings.test.ts tests/substrate.test.ts tests/scan.test.ts tests/extract.test.ts tests/join.test.ts tests/heat.test.ts tests/nuclei.test.ts tests/render.test.ts"
+    "test:smoke": "vitest run tests/startup.test.ts tests/config.test.ts tests/settings.test.ts tests/substrate.test.ts tests/scan.test.ts tests/extract.test.ts tests/join.test.ts tests/heat.test.ts tests/nuclei.test.ts tests/render.test.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",

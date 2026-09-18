@@ -13,6 +13,29 @@ Typecheck plus only the tests your working tree touches, seconds instead of the
 from `src/` via jiti, so green checks on the files you touched mean the change
 is live.
 
+## Startup: lazy execution must also mean lazy imports
+
+Warm jiti caches remove transpilation, not V8 module compilation. The extension
+previously deferred graph work while still statically importing `ops`, `state`,
+`sync`, and their entire analysis graph. Keep registration, root bookkeeping,
+and idle lifecycle hooks lightweight; `core/extension-runtime.ts` loads only
+when an operation actually needs analysis. Cleanup must not import an unused
+runtime. Preserve reset/shutdown behavior after activation and coalesce concurrent
+first loads. Type-only dependencies must use `import type`.
+
+Do not move the cost into `session_start`, an idle prompt, an immediately invoked
+async initializer, or a zero-delay background import. Avoid broad barrel imports
+from startup code. Even catalog or schema-builder imports have transitive costs;
+native ESM can bypass Pi's virtual host modules and load another package copy.
+
+`tests/startup.test.ts` checks the complete static graph, byte budget, idle
+lifecycle, first use, and activated cleanup. Keep it alongside the extension
+behavior tests when changing imports; do not raise the budget to hide growth.
+Measure fresh-process imports with warm filesystem caches, never repeated imports
+in one process. From the sibling Fabric checkout, run
+`bun run benchmark:startup ../pi-fovea`. Timings are observations; deterministic
+graph and behavior checks are the regression gate. Development remains buildless.
+
 ## Checks are incremental, never a full sweep
 
 Never run the whole suite as a gate. Verify the files a change touches:
