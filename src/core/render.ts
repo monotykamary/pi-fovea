@@ -5,6 +5,8 @@
 // on prefix length — aider's render-and-count loop generalized to a field.
 
 import { writeSpill } from "./temp-storage.js";
+import { disclosureDecision } from "./disclosure.js";
+import { shownCount, remainingCount } from "../verified/policy.js";
 import type { Edge, EdgeEvidence, EdgeKind, Graph, NodeRec } from "./types.js";
 
 export const tokenEstimate = (text: string): number => Math.ceil(text.length / 4);
@@ -151,10 +153,13 @@ export const revealFoveated = (
     const direct = relations.get(i);
     if ((!direct || direct.kind === "contains") && (h < WARM_TIER * 0.1 || field[i]! < HEAT_EPS)) continue;
     const id = g.nodes[i]!.id;
-    if (opts.include && !opts.include.has(id)) continue;
-    if (opts.exclude?.has(id)) continue;
     const inNucleus = seedSet.has(i) || (direct !== undefined && direct.kind !== "contains");
-    if (opts.disclosed?.has(id) && !(opts.repeatNucleus && inNucleus)) { suppressed++; continue; }
+    const decision = disclosureDecision(
+      !opts.include || opts.include.has(id), opts.exclude?.has(id) ?? false,
+      opts.disclosed?.has(id) ?? false, opts.repeatNucleus ?? false, inNucleus,
+    );
+    if (decision === "D") continue;
+    if (decision === "S") { suppressed++; continue; }
     candidates.push(i);
   }
   const byHeat = cmpNodes(g, field);
@@ -166,7 +171,7 @@ export const revealFoveated = (
   const cap = Math.max(0, Math.floor(opts.maxCandidates ?? 400));
   const capped = candidates.slice(0, cap);
   const litTotal = candidates.length;
-  const candidateOmitted = litTotal - capped.length;
+  const candidateOmitted = remainingCount(litTotal, capped.length);
 
   // Individual lines first (hot signatures, warm one-liners), then the cheap
   // glow periphery collapsed per file. The prefix is over BOTH lists so the
@@ -250,11 +255,10 @@ export const revealFoveated = (
   const individual = lines.length;
 
   const header = `${opts.header ?? "fovea"}${suppressed ? ` · ${suppressed} prior results omitted` : ""}`;
-  const collapsed = litTotal - individual;
   const artifactNote = opts.overflowTo ? ` — full list saved to ${opts.overflowTo}` : "";
   const renderK = (k: number, note = artifactNote): string => {
-    const shownIndiv = Math.min(k, individual);
-    const remaining = collapsed + individual - shownIndiv;
+    const shownIndiv = shownCount(individual, k);
+    const remaining = remainingCount(litTotal, shownIndiv);
     const footer = remaining > 0
       ? `\n… ${remaining} more results collapsed or outside budget${note} — use fovea_dwell for wider context`
       : "";
@@ -274,11 +278,11 @@ export const revealFoveated = (
     if (!fits(0)) k = -1; // extreme budgets: header + footer only
   }
   let text = k >= 0 ? renderK(k) : header;
-  const shown = k >= 0 ? Math.min(k, individual) : 0;
+  const shown = shownCount(individual, k >= 0 ? k : 0);
   // The footer appears whenever anything was omitted — a collapsed glow
   // periphery counts even when the rendered prefix fit — so the artifact
   // write must gate on the same condition, or the footer names a dead path.
-  const truncated = collapsed + individual - shown > 0;
+  const truncated = remainingCount(litTotal, shown) > 0;
   let overflowPath: string | undefined;
   if (truncated && opts.overflowTo) {
     try {
@@ -317,7 +321,7 @@ export const revealGroups = (
   const artifactNote = opts.overflowTo ? ` — full list saved to ${opts.overflowTo}` : "";
   const renderK = (k: number, note = artifactNote): string => {
     const body = ordered.slice(0, k).map((gl) => `${gl.label.padEnd(2)} ${gl.detail}`);
-    const rest = ordered.length - k;
+    const rest = remainingCount(ordered.length, k);
     const footer = rest > 0 ? [`\n… ${rest} more groups omitted${note} — use fovea_focus for detail`] : [];
     return [opts.header, ...body, ...footer].join("\n");
   };
@@ -349,11 +353,11 @@ export const revealGroups = (
   return {
     text,
     tokens: tokenEstimate(text),
-    shown: Math.min(ordered.length, ordered.length),
+    shown: shownCount(ordered.length, kBest),
     suppressed: 0,
     litTotal: ordered.length,
     candidateOmitted: 0,
-    truncated: ordered.length > 0 && kBest < ordered.length,
+    truncated: remainingCount(ordered.length, kBest) > 0,
     overflowPath,
   };
 };

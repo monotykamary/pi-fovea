@@ -544,11 +544,21 @@ calls and proof checking are not modeled; Bend 1/HVM syntax is not supported.
 
 ```sh
 bun install
-bun run check:fast   # typecheck + tests your working tree affects
+bun run check:fast   # Bend laws + artifact parity + typecheck + affected tests
 bun run test:smoke   # curated scan-to-render floor, seconds
 bun run bench        # rate–distortion and refresh bench against ../pi-fabric
 bun run bench tests/fixtures/mini  # self-contained smoke run
 ```
+
+Development checks require **Bend 2.0.26** (`bend guide`). See [laws, proofs, and
+which tests they can replace](docs/proofs.md). Bend is development-only; the
+extension and published CLI need no Bend installation or generation step.
+Production executes the committed Bend-compiled disclosure, prefix-accounting,
+and heat-basis command kernels. After changing their sources or adapters, run
+`bun run proofs:generate`; `bun run proofs:artifact` checks the receipt without
+Bend. CLI builds check that receipt; publishing also proves and reproduces the
+artifact. The Float64 heat solver still relies on numerical tests, not a proof
+of its approximation or rounding errors.
 
 The [warm-path performance report](docs/performance.md) compares the coverage-complete implementation with the optimized version. `bun run corpus:performance <coverage-work> <before-source> <after-source> [rounds]` runs alternating, isolated comparisons with a shared extraction snapshot, independent Git indexes, and exact graph, focus/dwell/sketch, and overflow-content checks. It does not trade fewer candidates or weaker freshness checks for speed. For Node, run `NODE_OPTIONS='--import tsx' node scripts/performance-corpus.mjs ...`; development dependencies are required.
 

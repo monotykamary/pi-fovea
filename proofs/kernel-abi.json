@@ -1,0 +1,6 @@
+{
+  "disclosure": [["scope", "boolean"], ["excluded", "boolean"], ["seen", "boolean"], ["repeat", "boolean"], ["nucleus", "boolean"], "DisclosureDecision"],
+  "shownCount": [["total", "bigint"], ["requested", "bigint"], "bigint"],
+  "remainingCount": [["total", "bigint"], ["requested", "bigint"], "bigint"],
+  "basisStep": [["have", "bigint"], ["order", "bigint"], "BasisStep"]
+}

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "bend": "2.0.26",
+  "toolchain": {
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3"
+  },
+  "inputs": {
+    "LAWS.bend": "e6a6905deb2399c982cc9813c1cd07c335b0f6eb93743ade0e02a745e5675553",
+    "PROOF.bend": "fb6b601e5236fc74146247335e262d98a1129019c7625ffd7d5321974fb9bc57",
+    "proofs/basis.bend": "5b2e2bbb80e1fa6223e5531cf5dda478de95a155e5b5b57fab9b93f6ae56300b",
+    "proofs/counts-proof.bend": "78b4fa5b923b52d94659d5e387ef0ac5481771b079c424b77ad54c27c41b76ad",
+    "proofs/counts.bend": "aec54ea26f512117cb662c21e9015194fc0ed0b1e7fb99450a80f0b281a10d8f",
+    "proofs/disclosure.bend": "0a762652d66b3669ce90838f3e48aff16908f8f3a454566623b8cbb930377682",
+    "proofs/heat.bend": "a7fd4fb7b77c8ebb2c2ec029e285f67441bd3687ea6531f18ae10fc0f01a9966",
+    "proofs/kernel-abi.json": "bb7eb78decba5e97e33b2da6d5514d6c80c6210656a00b9ca5677d727b3d51c1",
+    "proofs/kernel-types.d.ts": "30563d99cd10bb9ad2d2610726ed5cfc2b711d9ff4cf3d59e89e3bd74031d41d",
+    "proofs/kernel.bend": "88cf3203a12f50cbef59199e37b542e257513b9d57886c70a0a85d440bced3b4",
+    "proofs/nat-proof.bend": "667c31d8126b3bacfdbd867ceb766c9480eb0e213c2e641a015375c13eeae5f4",
+    "scripts/check-proofs.mjs": "966900e49c4e20399dc91156f12729932a1f4a30503fbba0f5fb564e6a99ee5e",
+    "scripts/compile-bend.mjs": "adb0953edaed6a4c2523f09202aa9689cfec917b6f71777bc8c4f66ed669377c",
+    "src/core/disclosure.ts": "9043643247a7c6940fddea70404286016f91fd6b146796b2107b4aeaf085239e",
+    "src/verified/policy.ts": "3163e96082867b4bb75f1a316b3623c9db12d3bc6bcc41be061fa9a28deac633"
+  },
+  "outputs": {
+    "src/verified/generated/kernel.js": "479150cbdfc1d480c8b1afc8f3a0791917c45953a01b45166fcd09b2bb38e7d5",
+    "src/verified/generated/kernel.d.ts": "2dde6392c97f921b60a92832a31b541621894a3317f07811dc3a631514502223"
+  }
+}

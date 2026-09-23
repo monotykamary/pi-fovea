@@ -256,6 +256,10 @@ describe("overflow artifacts", () => {
     const artifact = readFileSync(path, "utf8");
     expect(artifact).toContain("d59");
     expect(fit.text).not.toContain("d59");
+    const displayed = fit.text.split("\n").filter(line => /^d[0-9]+ /.test(line)).length;
+    expect(fit.shown).toBe(displayed);
+    expect(fit.shown).toBeLessThan(groups.length);
+    expect(fit.text).toContain(`${groups.length - fit.shown} more groups omitted`);
   });
 
   it("writes the artifact when only the glow periphery overflows", () => {

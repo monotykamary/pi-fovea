@@ -152,12 +152,33 @@ describe("heat diffusion", () => {
     expect(maxOther).toBeLessThan(v[3]!);
   });
 
-  it("dwell monotonicity: increasing t strictly widens the lit set", () => {
+  it("widens the lit set on the seeded random-graph fixture", () => {
     const g = randomGraph(80, 0.05, 11);
     const csr = buildCsr(g);
     const s = new Float64Array(80);
     s[0] = 1;
     const lit = (t: number) => heatAt(csr, s, t).filter((x) => x > 0.02 * Math.max(...heatAt(csr, s, t))).length;
     expect(lit(1)).toBeLessThanOrEqual(lit(8));
+  });
+
+  it("can lose thresholded lit nodes as time increases on weighted graphs", () => {
+    // The weak leaf initially retains its seed mass, but its stationary
+    // symmetric heat is below 2% of the hub. Spread is not threshold monotonicity.
+    const g = randomGraph(3, 0, 1);
+    g.edges = [
+      { a: 0, b: 1, kind: "invokes", w: 1e-6 },
+      { a: 0, b: 2, kind: "invokes", w: 1 },
+    ];
+    const csr = buildCsr(g);
+    const seed = new Float64Array([0, 1, 0]);
+    // Both independent evaluators witness this; it is not Chebyshev ringing.
+    for (const evaluate of [heatAt, taylorReference]) {
+      const lit = [8, 64].map(t => {
+        const field = evaluate(csr, seed, t);
+        const cutoff = 0.02 * Math.max(...field);
+        return field.filter(value => value > cutoff).length;
+      });
+      expect(lit).toEqual([3, 2]);
+    }
   });
 });

@@ -23,6 +23,7 @@
 // recombining coefficients. The operator is the index.
 
 import type { Graph } from "./types.js";
+import { nextBasisStep } from "../verified/policy.js";
 
 export interface Csr {
   n: number;
@@ -137,17 +138,26 @@ export const chebyshevVectors = (csr: Csr, s: Float64Array, K: number): Float64A
 // Append only missing orders. The caller owns the seed/operator generation;
 // existing vectors are never overwritten, and normalization stays invocation-local.
 export const extendChebyshevVectors = (csr: Csr, tk: Float64Array[], K: number): Float64Array[] => {
-  if (!tk.length) throw new Error("Cannot extend an empty Chebyshev basis");
-  if (tk.length > K) return tk;
-  const invSqrt = inverseDegrees(csr);
-  if (tk.length === 1) tk[1] = applyNegP(csr, tk[0]!, invSqrt);
-  for (let k = tk.length; k <= K; k++) {
-    const out = applyNegP(csr, tk[k - 1]!, invSqrt);
-    const p2 = tk[k - 2]!;
-    for (let i = 0; i < csr.n; i++) out[i] = 2 * out[i]! - p2[i]!;
-    tk[k] = out;
+  let invSqrt: Float64Array | undefined;
+  for (;;) {
+    const step = nextBasisStep(tk.length, K);
+    switch (step.$) {
+      case "Empty": throw new Error("Cannot extend an empty Chebyshev basis");
+      case "Done": return tk;
+      case "First":
+        invSqrt ??= inverseDegrees(csr);
+        tk[1] = applyNegP(csr, tk[0]!, invSqrt);
+        break;
+      case "Next": {
+        invSqrt ??= inverseDegrees(csr);
+        const out = applyNegP(csr, tk[step.previous]!, invSqrt);
+        const p2 = tk[step.older]!;
+        for (let i = 0; i < csr.n; i++) out[i] = 2 * out[i]! - p2[i]!;
+        tk[step.at] = out;
+        break;
+      }
+    }
   }
-  return tk;
 };
 
 export const heatField = (tk: Float64Array[], t: number, n: number): Float64Array => {

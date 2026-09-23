@@ -21,6 +21,16 @@ jobs:
       - name: ast-grep
         run: npm i -g @ast-grep/cli@0.45.3
       - run: bun install --frozen-lockfile
+      - name: Install Bend 2.0.26 (pinned archive)
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/bend.tar.gz" https://github.com/bendlang/bend/releases/download/v2.0.26/bend-2.0.26-linux-x64.tar.gz
+          echo "5edcc8e5c12d525655431ab02659ddf88e362aafbe7c7bb7f783a1ffaeb6165c  $RUNNER_TEMP/bend.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/bend.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/bend/bin" >> "$GITHUB_PATH"
+      - name: Laws, executable artifact, and proof bridge boundaries
+        run: |
+          bun run check:proofs
+          bunx vitest run tests/proofs.test.ts tests/verified-kernels.test.ts
       - name: Type check
         run: bun run typecheck
       - name: Affected tests
@@ -35,7 +45,5 @@ jobs:
         run: bun run test:smoke
       - name: Dead code
         run: bun run lint:dead
-      - name: CLI bundle smoke (the global install artifact)
-        run: |
-          bun run build:cli
-          node dist/cli.mjs status tests/fixtures/mini
+      - name: Isolated published package (CLI, generated kernels, proof receipts)
+        run: bun run check:package

@@ -8,8 +8,9 @@ Finish a change with the change-scoped check:
 bun run check:fast
 ```
 
-Typecheck plus only the tests your working tree touches, seconds instead of the
-55-second, 250-test suite. There is **no build step**: pi loads the extension
+Bend laws and generated-kernel parity, typecheck, then only the tests your
+working tree touches. Do not replace this selection with the full suite.
+There is **no extension build step**: pi loads the extension
 from `src/` via jiti, so green checks on the files you touched mean the change
 is live.
 
@@ -65,7 +66,24 @@ the signal. `bun run lint:dead` (knip) stays in CI because it costs under a
 second. There is no cross-platform matrix: nothing in `src/` or `tests/` branches
 on `process.platform`.
 
-Publishing runs `prepack` (`bun run build:cli`), never the suite.
+Publishing runs `prepack` (`check:proofs` then `build:cli`), never the suite.
+The CLI build checks the generated artifact receipt without invoking Bend and
+rejects unbundled dependencies other than Node built-ins. Before a release, run
+`bun run check:package`: it checks a real Bun tarball outside the checkout,
+including receipt hashes, entry points, licenses and compiler-free execution.
+`bun run check:package path/to/package.tgz` checks an existing archive; publish
+that same checked tarball with `bun publish path/to/package.tgz`.
+
+## Executed Bend kernels
+
+`LAWS.bend` names the actual exports of `proofs/kernel.bend`. Keep specifications
+independent; never weaken a law to make a proof pass. After editing proof sources,
+the ABI, bridge, or adapters: `bun run proofs:generate`, review the generated JS,
+then `bun run check:fast`. Do not hand-edit `src/verified/generated/`.
+The compiler is pinned to Bend 2.0.26. Unsafe definitions, unsafe Base primitives,
+foreign/remote imports and escaping local imports are forbidden. Installed Fovea
+needs no Bend executable, loader, or extension build; generated JS is committed.
+See `docs/proofs.md` for executed guarantees versus model-only heat algebra.
 
 ## Cache invalidation
 
