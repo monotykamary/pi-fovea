@@ -17,7 +17,7 @@ const source = read("package.json");
 const receiptPath = "src/verified/generated/manifest.json";
 const receipt = read(receiptPath);
 const files = [...new Set([
-  "dist/cli.mjs", "LICENSE", "THIRD_PARTY_NOTICES.md", "docs/licenses/bend-apache-2.0.txt",
+  "dist/cli.mjs", "skills/fovea/SKILL.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "docs/licenses/bend-apache-2.0.txt",
   receiptPath, ...Object.keys(receipt.inputs), ...Object.keys(receipt.outputs),
 ])];
 // Allowlist metadata so Pi peers, extension registration, and install/build

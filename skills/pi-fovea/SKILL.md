@@ -1,9 +1,12 @@
 ---
 name: pi-fovea
-description: Token-efficient repo navigation with the pi-fovea code graph. Use when you need to survey an unfamiliar repository, trace where a symbol or route lives and what depends on it, assess the blast radius of a change before editing, or re-orient after files have been edited mid-session (by any tool path, including bash and pi-fabric fabric_exec programs).
+description: Token-efficient repo navigation through the pi-fovea extension tools in Pi. Use when fovea_sketch, fovea_focus, fovea_dwell, and fovea_impact are available to survey repositories, trace symbols and routes, assess change impact, or re-orient after edits with session-aware sync. Includes pi-fabric integration; use the fovea skill instead for standalone shell/CLI workflows.
 ---
 
 # pi-fovea
+
+Use this skill for the **Pi extension** and its in-session tools. For standalone
+shell commands, scripting, or CI, use the **fovea** skill instead.
 
 pi-fovea maintains a cross-language code graph of the working repository — routes, symbols, imports, calls, string/env literals — and exposes it through progressive disclosure: cheap silhouettes first, detail only where you point it. It costs almost nothing until you ask, and it re-syncs automatically whenever file content drifts, no matter which tool made the edit.
 
@@ -62,10 +65,6 @@ When writing or editing code **inside a `fabric_exec` program**, the fovea tools
 - Prefer a single `extensions.fovea_impact(...)` call over hand-rolled grep fan-outs when computing what an edit touches — the graph already connects extracted imports and calls. Inspect coverage details: import readers currently cover JS/TS, Go, Python, and Rust, not every symbol language.
 - Any file mutation performed by the program (including `pi.edit`/`pi.write` calls inside the sandbox) is picked up by turn sync automatically, so post-edit verification does not need a re-sketch.
 - Sketch `details` carries coverage counts; its compact text names the highest-value entry points. On an unfamiliar repo, fetch it once and reuse it instead of rediscovering entry points per call.
-
-## CLI
-
-The same engine runs headlessly as the `fovea` binary (repo root scan, plus JSON and TSV modes). Prefer the in-session tools unless you need scripting or a second opinion outside the extension's session state.
 
 ## Settings
 

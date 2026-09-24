@@ -35,6 +35,18 @@ The trailing number is the output token budget. Each CLI invocation is
 stateless; use the Pi extension for focus and dwell across an interactive
 session.
 
+## Agent skill
+
+The standalone package includes `skills/fovea/SKILL.md`, a portable **fovea**
+skill with navigation, impact, coverage, and stateless CLI workflows. Register
+that directory with your agent's skill loader, or copy it into the agent's skills
+directory. Installing the executable alone does not register the skill.
+
+For a global npm install, the skill directory is
+`$(npm root -g)/@monotykamary/fovea/skills/fovea`. It is also available in the
+[source repository](https://github.com/monotykamary/pi-fovea/tree/main/skills/fovea).
+The separate **pi-fovea** skill covers Pi extension tools and session behavior.
+
 ## Pi extension
 
 Install the separate `pi-fovea` package in Pi:

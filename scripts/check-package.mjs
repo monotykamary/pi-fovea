@@ -43,13 +43,17 @@ try {
     for (const key of ["pi", "exports", "dependencies", "peerDependencies", "peerDependenciesMeta", "devDependencies", "scripts", "workspaces"]) {
       assert(!(key in pkg), `CLI-only manifest must not include ${key}`);
     }
-    for (const path of ["src/index.ts", "skills", "cli.ts"]) {
+    for (const path of ["src/index.ts", "skills/pi-fovea", "cli.ts"]) {
       assert(!existsSync(join(unpacked, path)), `CLI-only archive must not include ${path}`);
     }
     assert.equal(read("README.md"), readFileSync(join(root, "docs/cli.md"), "utf8"));
   } else {
     assert.deepEqual(pkg.pi, expected.pi);
     assert.deepEqual(pkg.exports, expected.exports);
+  }
+  for (const name of cliOnly ? ["fovea"] : ["fovea", "pi-fovea"]) {
+    const path = `skills/${name}/SKILL.md`;
+    assert.equal(read(path), readFileSync(join(root, path), "utf8"), `packaged skill drift: ${name}`);
   }
   assert(!existsSync(join(unpacked, "node_modules")), "archive must not ship installed dependencies");
   for (const path of [

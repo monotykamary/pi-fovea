@@ -156,6 +156,20 @@ From a checkout, `bun run fovea` runs the live source via `tsx`, and `bun run bu
 `bun run pack:cli` produces the scoped CLI tarball at `dist/fovea-cli.tgz` using the
 root package version. See [CLI usage](docs/cli.md) and [release checks and publishing](docs/releasing.md).
 
+## Agent skills
+
+Choose the skill for the interface your agent uses:
+
+| Skill | Use it for |
+| --- | --- |
+| [pi-fovea](skills/pi-fovea/SKILL.md) | Pi extension tools, persistent focus/dwell, turn sync, and Fabric integration. |
+| [fovea](skills/fovea/SKILL.md) | Standalone shell/CI commands, explicit repository roots, and stateless navigation. |
+
+The Pi package exposes both skills. The standalone `@monotykamary/fovea` package
+ships only `skills/fovea/SKILL.md`; register that directory with your agent's skill
+loader, or copy it into its skills directory. Installing the CLI alone does not
+register a skill with an agent.
+
 ## Many projects, one conversation
 
 Your Pi cwd can be a parent folder, a launcher, or unrelated to the work.
