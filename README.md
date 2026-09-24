@@ -132,7 +132,7 @@ pi install /absolute/path/to/pi-fovea
 
 </details>
 
-There is also a package for any agent shell or CI:
+The standalone **`@monotykamary/fovea`** package provides the same engine for any agent shell or CI, without installing Pi:
 
 ```sh
 fovea sketch /path/to/repo 900
@@ -142,13 +142,19 @@ fovea rules /path/to/repo
 fovea status /path/to/repo
 ```
 
-Install the CLI globally — the published bin is a single self-contained bundle, so it runs on plain Node.js (no tsx, no node_modules):
+Install the CLI globally — its bundled JavaScript runs on plain Node.js (no Pi or tsx required):
 
 ```sh
-npm i -g pi-fovea      # or: bun add -g pi-fovea, bun add -g pi-fovea
+npm i -g @monotykamary/fovea      # or: bun add -g @monotykamary/fovea
 ```
 
+The executable is still `fovea`. The legacy `npm i -g pi-fovea` remains supported;
+choose one global package because both provide that executable. Installing the
+Pi extension through `pi install npm:pi-fovea` can coexist with the standalone CLI.
+
 From a checkout, `bun run fovea` runs the live source via `tsx`, and `bun run build:cli` rebuilds `dist/cli.mjs` (the `prepack` hook keeps the published bundle in sync).
+`bun run pack:cli` produces the scoped CLI tarball at `dist/fovea-cli.tgz` using the
+root package version. See [CLI usage](docs/cli.md) and [release checks and publishing](docs/releasing.md).
 
 ## Many projects, one conversation
 

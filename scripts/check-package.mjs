@@ -16,20 +16,45 @@ const run = (command, args, options = {}) => execFileSync(command, args, {
 });
 
 try {
-  assert(process.argv.length <= 3, "usage: node scripts/check-package.mjs [package.tgz]");
-  const archive = process.argv[2] ? resolve(process.argv[2]) : join(temp, "package.tgz");
-  if (!process.argv[2]) run("bun", ["pm", "pack", "--filename", archive, "--quiet"]);
+  const args = process.argv.slice(2);
+  const cliOnly = args[0] === "--cli";
+  if (cliOnly) args.shift();
+  assert(args.length <= 1 && !args[0]?.startsWith("-"), "usage: node scripts/check-package.mjs [--cli] [package.tgz]");
+  const archive = args[0] ? resolve(args[0]) : join(temp, "package.tgz");
+  if (!args[0]) {
+    if (cliOnly) run(process.execPath, ["scripts/pack-cli.mjs", archive]);
+    else run("bun", ["pm", "pack", "--filename", archive, "--quiet"]);
+  }
+  const entries = run("tar", ["-tzf", archive]).trim().split("\n");
+  assert(!entries.some(path => path.endsWith(".tgz")), "archive must not contain other release archives");
   run("tar", ["-xzf", archive, "-C", temp]);
   const unpacked = join(temp, "package");
   const read = path => readFileSync(join(unpacked, path), "utf8");
   const pkg = JSON.parse(read("package.json"));
   const expected = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  assert.equal(pkg.name, expected.name);
+  assert.equal(pkg.name, cliOnly ? "@monotykamary/fovea" : expected.name);
   assert.equal(pkg.version, expected.version);
+  assert.deepEqual(pkg.bin, { fovea: "dist/cli.mjs" });
+  assert.deepEqual(pkg.engines, expected.engines);
+  assert.deepEqual(pkg.optionalDependencies, expected.optionalDependencies);
+  assert.deepEqual(pkg.trustedDependencies, expected.trustedDependencies);
+  assert.deepEqual(pkg.publishConfig, { access: "public" });
+  if (cliOnly) {
+    for (const key of ["pi", "exports", "dependencies", "peerDependencies", "peerDependenciesMeta", "devDependencies", "scripts", "workspaces"]) {
+      assert(!(key in pkg), `CLI-only manifest must not include ${key}`);
+    }
+    for (const path of ["src/index.ts", "skills", "cli.ts"]) {
+      assert(!existsSync(join(unpacked, path)), `CLI-only archive must not include ${path}`);
+    }
+    assert.equal(read("README.md"), readFileSync(join(root, "docs/cli.md"), "utf8"));
+  } else {
+    assert.deepEqual(pkg.pi, expected.pi);
+    assert.deepEqual(pkg.exports, expected.exports);
+  }
   assert(!existsSync(join(unpacked, "node_modules")), "archive must not ship installed dependencies");
   for (const path of [
-    ...Object.values(pkg.bin), ...Object.values(pkg.exports), ...pkg.pi.extensions,
-    ...pkg.pi.skills, "LICENSE", "THIRD_PARTY_NOTICES.md", "docs/licenses/bend-apache-2.0.txt",
+    ...Object.values(pkg.bin), ...Object.values(pkg.exports ?? {}), ...(pkg.pi?.extensions ?? []),
+    ...(pkg.pi?.skills ?? []), "LICENSE", "THIRD_PARTY_NOTICES.md", "docs/licenses/bend-apache-2.0.txt",
   ]) assert(existsSync(join(unpacked, path)), `missing package entry: ${path}`);
 
   const receiptPath = "src/verified/generated/manifest.json";
@@ -57,7 +82,17 @@ assert.deepEqual(Object.keys(kernel).sort(), ${JSON.stringify(Object.keys(abi).s
 assert.equal(kernel.shownCount(3n, 2n), 2n);
 assert.deepEqual(kernel.basisStep(2n, 3n), {$: "Next", at: 2n, previous: 1n, older: 0n});
 `], { cwd: temp, env });
-  console.log(`${pkg.name}@${pkg.version}: isolated tarball, entry points, proof receipts, licenses, CLI and kernel verified`);
+  if (cliOnly) {
+    // Exercise npm's actual global bin link in a disposable prefix, offline and
+    // without optional parsers. No change to the user's global installation.
+    const prefix = join(temp, "global");
+    run("npm", ["install", "--global", "--prefix", prefix, "--cache", join(temp, "npm-cache"),
+      "--offline", "--omit=optional", "--ignore-scripts", "--no-audit", "--no-fund", archive], { cwd: temp, env });
+    const installed = run(join(prefix, "bin/fovea"), ["sketch", fixture, "512"], { cwd: temp, env });
+    assert.match(installed, /fovea sketch/);
+    assert.match(installed, /packagedProbe/);
+  }
+  console.log(`${pkg.name}@${pkg.version}: isolated tarball, entry points, proof receipts, licenses, CLI and kernel verified${cliOnly ? ", global npm bin verified" : ""}`);
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }

@@ -45,5 +45,7 @@ jobs:
         run: bun run test:smoke
       - name: Dead code
         run: bun run lint:dead
-      - name: Isolated published package (CLI, generated kernels, proof receipts)
-        run: bun run check:package
+      - name: Isolated published packages (CLI, generated kernels, proof receipts)
+        run: |
+          bun run check:package
+          bun run check:package:cli
